@@ -80,15 +80,15 @@ following:
 
     trainer:
       callbacks:
-        - class_path: lightning.pytorch.callbacks.EarlyStopping
+        - class_path: lightning.pytorch.callbacks.ModelCheckpoint
           init_args:
-            patience: 5
+            save_weights_only: true
         - class_path: lightning.pytorch.callbacks.LearningRateMonitor
           init_args:
-            ...
+            logging_interval: 'epoch'
 
 Similar to the callbacks, any parameter in :class:`~lightning.pytorch.trainer.trainer.Trainer` and user extended
-:class:`~lightning.pytorch.core.module.LightningModule` and
+:class:`~lightning.pytorch.core.LightningModule` and
 :class:`~lightning.pytorch.core.datamodule.LightningDataModule` classes that have as type hint a class, can be
 configured the same way using ``class_path`` and ``init_args``. If the package that defines a subclass is imported
 before the :class:`~lightning.pytorch.cli.LightningCLI` class is run, the name can be used instead of the full import
@@ -158,7 +158,7 @@ A possible config file could be as follows:
         ...
 
 Only model classes that are a subclass of ``MyModelBaseClass`` would be allowed, and similarly, only subclasses of
-``MyDataModuleBaseClass``. If as base classes :class:`~lightning.pytorch.core.module.LightningModule` and
+``MyDataModuleBaseClass``. If as base classes :class:`~lightning.pytorch.core.LightningModule` and
 :class:`~lightning.pytorch.core.datamodule.LightningDataModule` is given, then the CLI would allow any lightning module
 and data module.
 
@@ -197,6 +197,7 @@ Since the init parameters of the model have as a type hint a class, in the confi
                 decoder: Instance of a module for decoding
             """
             super().__init__()
+            self.save_hyperparameters()
             self.encoder = encoder
             self.decoder = decoder
 
@@ -215,6 +216,13 @@ If the CLI is implemented as ``LightningCLI(MyMainModel)`` the configuration wou
           ...
 
 It is also possible to combine ``subclass_mode_model=True`` and submodules, thereby having two levels of ``class_path``.
+
+.. tip::
+
+    By having ``self.save_hyperparameters()`` it becomes possible to load the model from a checkpoint. Simply do
+    ``ModelClass.load_from_checkpoint("path/to/checkpoint.ckpt")``. In the case of using ``subclass_mode_model=True``,
+    then load it like ``LightningModule.load_from_checkpoint("path/to/checkpoint.ckpt")``. ``save_hyperparameters`` is
+    optional and can be safely removed if there is no need to load from a checkpoint.
 
 
 Fixed optimizer and scheduler
@@ -279,6 +287,7 @@ An example of a model that uses two optimizers is the following:
     class MyModel(LightningModule):
         def __init__(self, optimizer1: OptimizerCallable, optimizer2: OptimizerCallable):
             super().__init__()
+            self.save_hyperparameters()
             self.optimizer1 = optimizer1
             self.optimizer2 = optimizer2
 
@@ -290,7 +299,7 @@ An example of a model that uses two optimizers is the following:
 
     cli = MyLightningCLI(MyModel, auto_configure_optimizers=False)
 
-Note the type ``Callable[[Iterable], Optimizer]``, which denotes a function that receives a singe argument, some
+Note the type ``Callable[[Iterable], Optimizer]``, which denotes a function that receives a single argument, some
 learnable parameters, and returns an optimizer instance. With this, from the command line it is possible to select the
 class and init arguments for each of the optimizers, as follows:
 
@@ -318,6 +327,7 @@ that uses dependency injection for an optimizer and a learning scheduler is:
             scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
         ):
             super().__init__()
+            self.save_hyperparameters()
             self.optimizer = optimizer
             self.scheduler = scheduler
 

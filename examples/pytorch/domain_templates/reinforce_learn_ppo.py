@@ -26,9 +26,12 @@ References
 [1] https://github.com/openai/baselines/blob/master/baselines/ppo2/ppo2.py
 [2] https://github.com/openai/spinningup
 [3] https://github.com/sid-sundrani/ppo_lightning
+
 """
+
 import argparse
-from typing import Callable, Iterator, List, Tuple
+from collections.abc import Iterator
+from typing import Callable
 
 import gym
 import torch
@@ -37,10 +40,10 @@ from torch.distributions import Categorical, Normal
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, IterableDataset
 
-from lightning.pytorch import cli_lightning_logo, LightningModule, seed_everything, Trainer
+from lightning.pytorch import LightningModule, Trainer, cli_lightning_logo, seed_everything
 
 
-def create_mlp(input_shape: Tuple[int], n_actions: int, hidden_size: int = 128):
+def create_mlp(input_shape: tuple[int], n_actions: int, hidden_size: int = 128):
     """Simple Multi-Layer Perceptron network."""
     return nn.Sequential(
         nn.Linear(input_shape[0], hidden_size),
@@ -52,8 +55,7 @@ def create_mlp(input_shape: Tuple[int], n_actions: int, hidden_size: int = 128):
 
 
 class ActorCategorical(nn.Module):
-    """Policy network, for discrete action spaces, which returns a distribution and an action given an
-    observation."""
+    """Policy network, for discrete action spaces, which returns a distribution and an action given an observation."""
 
     def __init__(self, actor_net):
         """
@@ -81,6 +83,7 @@ class ActorCategorical(nn.Module):
 
         Returns:
             log probability of the action under pi
+
         """
         return pi.log_prob(actions)
 
@@ -117,6 +120,7 @@ class ActorContinuous(nn.Module):
 
         Returns:
             log probability of the action under pi
+
         """
         return pi.log_prob(actions).sum(axis=-1)
 
@@ -127,6 +131,7 @@ class ExperienceSourceDataset(IterableDataset):
 
     Basic experience source dataset. Takes a generate_batch function that returns an iterator. The logic for the
     experience source and how the batch is generated is defined the Lightning model itself
+
     """
 
     def __init__(self, generate_batch: Callable):
@@ -144,6 +149,7 @@ class PPOLightning(LightningModule):
     Train:
         trainer = Trainer()
         trainer.fit(model)
+
     """
 
     def __init__(
@@ -223,7 +229,7 @@ class PPOLightning(LightningModule):
 
         self.state = torch.FloatTensor(self.env.reset())
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Passes in a state x through the network and returns the policy and a sampled action.
 
         Args:
@@ -231,13 +237,14 @@ class PPOLightning(LightningModule):
 
         Returns:
             Tuple of policy and action
+
         """
         pi, action = self.actor(x)
         value = self.critic(x)
 
         return pi, action, value
 
-    def discount_rewards(self, rewards: List[float], discount: float) -> List[float]:
+    def discount_rewards(self, rewards: list[float], discount: float) -> list[float]:
         """Calculate the discounted rewards of all rewards in list.
 
         Args:
@@ -245,6 +252,7 @@ class PPOLightning(LightningModule):
 
         Returns:
             list of discounted rewards/advantages
+
         """
         assert isinstance(rewards[0], float)
 
@@ -257,7 +265,7 @@ class PPOLightning(LightningModule):
 
         return list(reversed(cumul_reward))
 
-    def calc_advantage(self, rewards: List[float], values: List[float], last_value: float) -> List[float]:
+    def calc_advantage(self, rewards: list[float], values: list[float], last_value: float) -> list[float]:
         """Calculate the advantage given rewards, state values, and the last value of episode.
 
         Args:
@@ -267,6 +275,7 @@ class PPOLightning(LightningModule):
 
         Returns:
             list of advantages
+
         """
         rews = rewards + [last_value]
         vals = values + [last_value]
@@ -274,7 +283,7 @@ class PPOLightning(LightningModule):
         delta = [rews[i] + self.gamma * vals[i + 1] - vals[i] for i in range(len(rews) - 1)]
         return self.discount_rewards(delta, self.gamma * self.lam)
 
-    def generate_trajectory_samples(self) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    def generate_trajectory_samples(self) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
         """
         Contains the logic for generating trajectory data to train policy and value network
         Yield:
@@ -368,11 +377,12 @@ class PPOLightning(LightningModule):
         value = self.critic(state)
         return (qval - value).pow(2).mean()
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor]):
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor]):
         """Carries out a single update to actor and critic network from a batch of replay buffer.
 
         Args:
             batch: batch of replay buffer/trajectory data
+
         """
         state, action, old_logp, qval, adv = batch
 
@@ -398,15 +408,14 @@ class PPOLightning(LightningModule):
         self.log("loss_critic", loss_critic, on_step=False, on_epoch=True, prog_bar=False, logger=True)
         self.log("loss_actor", loss_actor, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
-    def configure_optimizers(self) -> List[Optimizer]:
+    def configure_optimizers(self) -> list[Optimizer]:
         """Initialize Adam optimizer."""
         optimizer_actor = torch.optim.Adam(self.actor.parameters(), lr=self.lr_actor)
         optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=self.lr_critic)
         return optimizer_actor, optimizer_critic
 
     def optimizer_step(self, *args, **kwargs):
-        """Run 'nb_optim_iters' number of iterations of gradient descent on actor and critic for each data
-        sample."""
+        """Run 'nb_optim_iters' number of iterations of gradient descent on actor and critic for each data sample."""
         for _ in range(self.nb_optim_iters):
             super().optimizer_step(*args, **kwargs)
 

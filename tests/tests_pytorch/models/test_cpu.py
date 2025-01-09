@@ -18,7 +18,7 @@ import torch
 
 import tests_pytorch.helpers.pipelines as tpipes
 import tests_pytorch.helpers.utils as tutils
-from lightning.pytorch import Trainer
+from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.demos.boring_classes import BoringModel
 from tests_pytorch.helpers.datamodules import ClassifDataModule
@@ -27,22 +27,24 @@ from tests_pytorch.helpers.simple_models import ClassificationModel
 
 
 @mock.patch("lightning.fabric.plugins.environments.slurm.SLURMEnvironment.detect", return_value=True)
-def test_cpu_slurm_save_load(_, tmpdir):
+def test_cpu_slurm_save_load(_, tmp_path):
     """Verify model save/load/checkpoint on CPU."""
+    seed_everything(42)
+
     model = BoringModel()
 
     # logger file to get meta
-    logger = tutils.get_default_logger(tmpdir)
+    logger = tutils.get_default_logger(tmp_path)
     version = logger.version
 
     # fit model
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         max_epochs=1,
         logger=logger,
         limit_train_batches=0.2,
         limit_val_batches=0.2,
-        callbacks=[ModelCheckpoint(dirpath=tmpdir)],
+        callbacks=[ModelCheckpoint(dirpath=tmp_path)],
     )
     trainer.fit(model)
     real_global_step = trainer.global_step
@@ -73,7 +75,7 @@ def test_cpu_slurm_save_load(_, tmpdir):
     assert os.path.exists(hpc_save_path)
 
     # new logger file to get meta
-    logger = tutils.get_default_logger(tmpdir, version=version)
+    logger = tutils.get_default_logger(tmp_path, version=version)
 
     model = BoringModel()
 
@@ -90,17 +92,19 @@ def test_cpu_slurm_save_load(_, tmpdir):
             model.train(mode)
 
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         max_epochs=1,
         logger=logger,
-        callbacks=[_StartCallback(), ModelCheckpoint(dirpath=tmpdir)],
+        callbacks=[_StartCallback(), ModelCheckpoint(dirpath=tmp_path)],
     )
     # by calling fit again, we trigger training, loading weights from the cluster
     # and our hook to predict using current model before any more weight updates
     trainer.fit(model)
 
 
-def test_early_stopping_cpu_model(tmpdir):
+def test_early_stopping_cpu_model(tmp_path):
+    seed_everything(42)
+
     class ModelTrainVal(BoringModel):
         def validation_step(self, *args, **kwargs):
             output = super().validation_step(*args, **kwargs)
@@ -110,7 +114,7 @@ def test_early_stopping_cpu_model(tmpdir):
     stopping = EarlyStopping(monitor="val_loss", min_delta=0.1)
     trainer_options = {
         "callbacks": [stopping],
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "gradient_clip_val": 1.0,
         "enable_progress_bar": False,
         "accumulate_grad_batches": 2,
@@ -127,10 +131,12 @@ def test_early_stopping_cpu_model(tmpdir):
 
 
 @RunIf(skip_windows=True, sklearn=True)
-def test_multi_cpu_model_ddp(tmpdir):
+def test_multi_cpu_model_ddp(tmp_path):
     """Make sure DDP works."""
+    seed_everything(42)
+
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "enable_progress_bar": False,
         "max_epochs": 1,
         "limit_train_batches": 0.4,
@@ -145,11 +151,13 @@ def test_multi_cpu_model_ddp(tmpdir):
     tpipes.run_model_test(trainer_options, model, data=dm)
 
 
-def test_lbfgs_cpu_model(tmpdir):
+def test_lbfgs_cpu_model(tmp_path):
     """Test each of the trainer options.
 
     Testing LBFGS optimizer
+
     """
+    seed_everything(42)
 
     class ModelSpecifiedOptimizer(BoringModel):
         def __init__(self, optimizer_name, learning_rate):
@@ -159,7 +167,7 @@ def test_lbfgs_cpu_model(tmpdir):
             self.save_hyperparameters()
 
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "max_epochs": 1,
         "enable_progress_bar": False,
         "limit_train_batches": 0.2,
@@ -170,10 +178,12 @@ def test_lbfgs_cpu_model(tmpdir):
     tpipes.run_model_test_without_loggers(trainer_options, model, min_acc=0.01)
 
 
-def test_default_logger_callbacks_cpu_model(tmpdir):
+def test_default_logger_callbacks_cpu_model(tmp_path):
     """Test each of the trainer options."""
+    seed_everything(42)
+
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "max_epochs": 1,
         "gradient_clip_val": 1.0,
         "overfit_batches": 0.20,
@@ -190,8 +200,9 @@ def test_default_logger_callbacks_cpu_model(tmpdir):
     model.unfreeze()
 
 
-def test_running_test_after_fitting(tmpdir):
+def test_running_test_after_fitting(tmp_path):
     """Verify test() on fitted model."""
+    seed_everything(42)
 
     class ModelTrainValTest(BoringModel):
         def validation_step(self, *args, **kwargs):
@@ -207,14 +218,14 @@ def test_running_test_after_fitting(tmpdir):
     model = ModelTrainValTest()
 
     # logger file to get meta
-    logger = tutils.get_default_logger(tmpdir)
+    logger = tutils.get_default_logger(tmp_path)
 
     # logger file to get weights
     checkpoint = tutils.init_checkpoint_callback(logger)
 
     # fit model
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         enable_progress_bar=False,
         max_epochs=2,
         limit_train_batches=0.4,
@@ -233,11 +244,13 @@ def test_running_test_after_fitting(tmpdir):
     tutils.assert_ok_model_acc(trainer, key="test_loss", thr=0.5)
 
 
-def test_running_test_no_val(tmpdir):
+def test_running_test_no_val(tmp_path):
     """Verify `test()` works on a model with no `val_dataloader`.
 
     It performs train and test only
+
     """
+    seed_everything(42)
 
     class ModelTrainTest(BoringModel):
         def test_step(self, *args, **kwargs):
@@ -250,14 +263,14 @@ def test_running_test_no_val(tmpdir):
     model = ModelTrainTest()
 
     # logger file to get meta
-    logger = tutils.get_default_logger(tmpdir)
+    logger = tutils.get_default_logger(tmp_path)
 
     # logger file to get weights
     checkpoint = tutils.init_checkpoint_callback(logger)
 
     # fit model
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         enable_progress_bar=False,
         max_epochs=1,
         limit_train_batches=0.4,
@@ -276,22 +289,11 @@ def test_running_test_no_val(tmpdir):
     tutils.assert_ok_model_acc(trainer, key="test_loss")
 
 
-def test_simple_cpu(tmpdir):
-    """Verify continue training session on CPU."""
-    model = BoringModel()
-
-    # fit model
-    trainer = Trainer(default_root_dir=tmpdir, max_epochs=1, limit_val_batches=0.1, limit_train_batches=20)
-    trainer.fit(model)
-
-    # traning complete
-    assert trainer.state.finished, "amp + ddp model failed to complete"
-
-
-def test_cpu_model(tmpdir):
+def test_cpu_model(tmp_path):
     """Make sure model trains on CPU."""
+    seed_everything(42)
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "enable_progress_bar": False,
         "max_epochs": 1,
         "limit_train_batches": 4,
@@ -302,10 +304,11 @@ def test_cpu_model(tmpdir):
     tpipes.run_model_test(trainer_options, model)
 
 
-def test_all_features_cpu_model(tmpdir):
+def test_all_features_cpu_model(tmp_path):
     """Test each of the trainer options."""
+    seed_everything(42)
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "gradient_clip_val": 1.0,
         "overfit_batches": 0.20,
         "enable_progress_bar": False,
@@ -316,5 +319,4 @@ def test_all_features_cpu_model(tmpdir):
     }
 
     model = BoringModel()
-
-    tpipes.run_model_test(trainer_options, model, min_acc=0.01)
+    tpipes.run_model_test(trainer_options, model)

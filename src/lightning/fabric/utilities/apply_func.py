@@ -12,31 +12,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Utilities used for collections."""
+
 from abc import ABC
 from functools import partial
-from typing import Any, Callable, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Union
 
-import numpy as np
 import torch
 from lightning_utilities.core.apply_func import apply_to_collection
 from torch import Tensor
 
+from lightning.fabric.utilities.imports import _NUMPY_AVAILABLE
 from lightning.fabric.utilities.types import _DEVICE
+
+if TYPE_CHECKING:
+    import numpy as np
 
 _BLOCKING_DEVICE_TYPES = ("cpu", "mps")
 
 
-def _from_numpy(value: np.ndarray, device: _DEVICE) -> Tensor:
-    return torch.from_numpy(value).to(device)  # type: ignore[arg-type]
+def _from_numpy(value: "np.ndarray", device: _DEVICE) -> Tensor:
+    return torch.from_numpy(value).to(device)
 
 
-CONVERSION_DTYPES: List[Tuple[Any, Callable[[Any, Any], Tensor]]] = [
+CONVERSION_DTYPES: list[tuple[Any, Callable[[Any, Any], Tensor]]] = [
     # bool -> uint8 as bool -> torch.bool triggers RuntimeError: Unsupported data type for NCCL process group
     (bool, partial(torch.tensor, dtype=torch.uint8)),
     (int, partial(torch.tensor, dtype=torch.int)),
     (float, partial(torch.tensor, dtype=torch.float)),
-    (np.ndarray, _from_numpy),
 ]
+
+if _NUMPY_AVAILABLE:
+    import numpy as np
+
+    CONVERSION_DTYPES.append((np.ndarray, _from_numpy))
 
 
 class _TransferableDataType(ABC):
@@ -56,6 +64,7 @@ class _TransferableDataType(ABC):
         ...         return self
         >>> isinstance(CustomObject(), _TransferableDataType)
         True
+
     """
 
     @classmethod
@@ -81,6 +90,7 @@ def move_data_to_device(batch: Any, device: _DEVICE) -> Any:
     See Also:
         - :meth:`torch.Tensor.to`
         - :class:`torch.device`
+
     """
     if isinstance(device, str):
         device = torch.device(device)
@@ -113,6 +123,7 @@ def convert_tensors_to_scalars(data: Any) -> Any:
     Raises:
         ValueError:
             If tensors inside ``metrics`` contains multiple elements, hence preventing conversion to a scalar.
+
     """
 
     def to_item(value: Tensor) -> Union[int, float, bool]:

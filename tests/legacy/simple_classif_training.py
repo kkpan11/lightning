@@ -15,12 +15,12 @@ import os
 import sys
 
 import torch
+from tests_pytorch.helpers.datamodules import ClassifDataModule
+from tests_pytorch.helpers.simple_models import ClassificationModel
 
 import lightning.pytorch as pl
 from lightning.pytorch import seed_everything
 from lightning.pytorch.callbacks import EarlyStopping
-from tests_pytorch.helpers.datamodules import ClassifDataModule
-from tests_pytorch.helpers.simple_models import ClassificationModel
 
 PATH_LEGACY = os.path.dirname(__file__)
 

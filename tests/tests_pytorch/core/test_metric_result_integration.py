@@ -201,7 +201,7 @@ def my_sync_dist(x, *_, **__):
     return x
 
 
-def test_result_collection_restoration(tmpdir):
+def test_result_collection_restoration(tmp_path):
     """This test make sure metrics are properly reloaded on failure."""
 
     result = _ResultCollection(True)
@@ -255,9 +255,9 @@ def test_result_collection_restoration(tmpdir):
         # make sure can be pickled
         pickle.loads(pickle.dumps(result))
         # make sure can be torch.loaded
-        filepath = str(tmpdir / "result")
+        filepath = str(tmp_path / "result")
         torch.save(result, filepath)
-        torch.load(filepath)
+        torch.load(filepath, weights_only=False)
 
         # assert metric state reset to default values
         result.reset()
@@ -356,7 +356,7 @@ def result_collection_reload(default_root_dir, accelerator="auto", devices=1, **
                 assert metrics["callback"]["tracking"] == expected
                 assert computed_value == 2
 
-                assert self.results["training_step.tracking_2"].value == total * devices
+                assert self.results["training_step.tracking_2"].value == total
                 assert metrics["callback"]["tracking_2"] == expected
                 assert computed_value == 2
                 self.has_validated_sum = True
@@ -380,12 +380,12 @@ def result_collection_reload(default_root_dir, accelerator="auto", devices=1, **
         trainer.fit(model)
     assert not model.has_validated_sum
 
-    tmpdir = (
+    tmp_path = (
         trainer.strategy.broadcast(trainer_kwargs["default_root_dir"], 0)
         if devices >= 2
         else trainer_kwargs["default_root_dir"]
     )
-    ckpt_path = os.path.join(tmpdir, "on_exception.ckpt")
+    ckpt_path = os.path.join(tmp_path, "on_exception.ckpt")
 
     trainer = Trainer(**trainer_kwargs)
     trainer.fit(model, ckpt_path=ckpt_path)
@@ -395,18 +395,18 @@ def result_collection_reload(default_root_dir, accelerator="auto", devices=1, **
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {},
+        pytest.param({}, marks=RunIf(mps=False)),
         pytest.param({"strategy": "ddp", "accelerator": "gpu", "devices": 1}, marks=RunIf(min_cuda_gpus=1)),
         pytest.param(
             {"strategy": "ddp", "accelerator": "gpu", "devices": 2}, marks=RunIf(min_cuda_gpus=2, standalone=True)
         ),
     ],
 )
-def test_result_collection_reload(tmpdir, kwargs):
-    result_collection_reload(default_root_dir=tmpdir, **kwargs)
+def test_result_collection_reload(tmp_path, kwargs):
+    result_collection_reload(default_root_dir=tmp_path, **kwargs)
 
 
-def test_metric_collections(tmpdir):
+def test_metric_collections(tmp_path):
     """This test ensures the metric attribute is properly found even with complex nested metric structure."""
 
     class TestModel(BoringModel):
@@ -415,9 +415,9 @@ def test_metric_collections(tmpdir):
             self.metrics_list = ModuleList([DummyMetric() for _ in range(2)])
             self.metrics_dict = ModuleDict({"a": DummyMetric(), "b": DummyMetric()})
             self.metrics_collection_dict = MetricCollection({"a": DummyMetric(), "b": DummyMetric()})
-            self.metrics_collection_dict_nested = ModuleDict(
-                {"a": ModuleList([ModuleDict({"b": DummyMetric()}), DummyMetric()])}
-            )
+            self.metrics_collection_dict_nested = ModuleDict({
+                "a": ModuleList([ModuleDict({"b": DummyMetric()}), DummyMetric()])
+            })
 
         def training_step(self, batch, batch_idx):
             loss = super().training_step(batch, batch_idx)
@@ -463,7 +463,7 @@ def test_metric_collections(tmpdir):
 
     model = TestModel()
 
-    trainer = Trainer(default_root_dir=tmpdir, max_epochs=2, limit_train_batches=2, limit_val_batches=0)
+    trainer = Trainer(default_root_dir=tmp_path, max_epochs=2, limit_train_batches=2, limit_val_batches=0)
     trainer.fit(model)
 
 
@@ -479,27 +479,34 @@ def test_metric_result_computed_check():
     assert cache is computed_value
 
 
-@pytest.mark.parametrize("floating_dtype", [torch.float, torch.double])
-def test_metric_result_respects_dtype(floating_dtype):
+@pytest.mark.parametrize(
+    ("default_type", "converted_type"),
+    [
+        (torch.half, torch.float),
+        (torch.float, torch.float),
+        (torch.double, torch.double),
+    ],
+)
+def test_metric_result_respects_dtype(default_type, converted_type):
     from lightning.pytorch.trainer.connectors.logger_connector.result import warning_cache
 
     warning_cache.clear()
 
-    torch.set_default_dtype(floating_dtype)
+    torch.set_default_dtype(default_type)
     fixed_dtype = torch.long  # default by PyTorch
 
     metadata = _Metadata("foo", "bar")
     metadata.sync = _Sync()
     rm = _ResultMetric(metadata, is_tensor=True)
 
-    assert rm.value.dtype == floating_dtype
+    assert rm.value.dtype == converted_type
     assert rm.cumulated_batch_size.dtype == fixed_dtype
 
     # two fixed point numbers - should be converted
     value, batch_size = tensor(2), 3
     assert value.dtype == fixed_dtype
     with pytest.warns(
-        UserWarning, match=rf"`self.log\('bar', ...\)` in your `foo` .* Converting it to {floating_dtype}"
+        UserWarning, match=rf"`self.log\('bar', ...\)` in your `foo` .* Converting it to {converted_type}"
     ):
         rm.update(value, batch_size)
     # floating and fixed
@@ -508,7 +515,7 @@ def test_metric_result_respects_dtype(floating_dtype):
     total = rm.compute()
 
     assert total == (2 * 3 + 4 * 5) / (5 + 3)
-    assert total.dtype == floating_dtype
+    assert total.dtype == converted_type
 
     # restore to avoid impacting other tests
     torch.set_default_dtype(torch.float)
@@ -532,6 +539,25 @@ def test_metric_result_dtype_promotion(reduce_fx):
 
     total = rm.compute()
     assert total.dtype == torch.double
+
+
+@pytest.mark.parametrize("input_dtype", [torch.int8, torch.float16, torch.bfloat16])
+def test_metric_result_precision_no_lower_than_float32(input_dtype):
+    """Test that the ResultMetric only stores values in float32 or higher precision for numerical stability."""
+    metadata = _Metadata("foo", "bar", reduce_fx="sum")
+    metadata.sync = _Sync()
+    metric = _ResultMetric(metadata, is_tensor=True)
+    assert metric.value.dtype == torch.float
+
+    # in bfloat16, truncation would occur at 256 (8 bit exponent)
+    # in int8, overflow would occur at 128
+    for i in range(1000):
+        metric.update(tensor(1.0, dtype=input_dtype), 1)
+        assert metric.value.dtype == torch.float32
+
+    total = metric.compute()
+    assert total.item() == 1000.0
+    assert total.dtype == torch.float32
 
 
 @pytest.mark.parametrize(("reduce_fx", "expected"), [(max, -2), (min, 2)])
@@ -599,8 +625,9 @@ def test_logger_sync_dist(distributed_env, log_val):
         else nullcontext()
     )
 
-    with warning_ctx(
-        PossibleUserWarning, match=r"recommended to use `self.log\('bar', ..., sync_dist=True\)`"
-    ), patch_ctx:
+    with (
+        warning_ctx(PossibleUserWarning, match=r"recommended to use `self.log\('bar', ..., sync_dist=True\)`"),
+        patch_ctx,
+    ):
         value = _ResultCollection._get_cache(result_metric, on_step=False)
     assert value == 0.5

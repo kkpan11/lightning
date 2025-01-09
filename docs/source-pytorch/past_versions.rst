@@ -3,7 +3,7 @@ Past PyTorch Lightning versions
 
 PyTorch Lightning :doc:`evolved over time <versioning>`. Here's the history of versions with links to their respective docs.
 
-To help you with keeping up to spead, check :doc:`Migration guide <upgrade/migration_guide>`.
+To help you with keeping up to speed, check :doc:`Migration guide <upgrade/migration_guide>`.
 
 .. list-table:: Past versions
    :widths: 5 50 30 15
@@ -110,7 +110,7 @@ To help you with keeping up to spead, check :doc:`Migration guide <upgrade/migra
        `1.2.6 <https://pytorch-lightning.readthedocs.io/en/1.2.6>`_,
        `1.2.7 <https://pytorch-lightning.readthedocs.io/en/1.2.7>`_,
        `1.2.8 <https://pytorch-lightning.readthedocs.io/en/1.2.8>`_,
-       `1.2.9 <https://pytorch-lightning.readthedocs.io/en/1.2.9>`_,
+       1.2.9,
        `1.2.10 <https://pytorch-lightning.readthedocs.io/en/1.2.10>`_
      -
 

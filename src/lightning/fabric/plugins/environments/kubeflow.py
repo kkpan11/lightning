@@ -15,53 +15,64 @@
 import logging
 import os
 
+from typing_extensions import override
+
 from lightning.fabric.plugins.environments.cluster_environment import ClusterEnvironment
 
 log = logging.getLogger(__name__)
 
 
 class KubeflowEnvironment(ClusterEnvironment):
-    """Environment for distributed training using the `PyTorchJob`_ operator from `Kubeflow`_
+    """Environment for distributed training using the `PyTorchJob`_ operator from `Kubeflow`_.
+
+    This environment, unlike others, does not get auto-detected and needs to be passed to the Fabric/Trainer
+    constructor manually.
 
     .. _PyTorchJob: https://www.kubeflow.org/docs/components/training/pytorch/
     .. _Kubeflow: https://www.kubeflow.org
+
     """
 
     @property
+    @override
     def creates_processes_externally(self) -> bool:
         return True
 
     @property
+    @override
     def main_address(self) -> str:
         return os.environ["MASTER_ADDR"]
 
     @property
+    @override
     def main_port(self) -> int:
         return int(os.environ["MASTER_PORT"])
 
     @staticmethod
+    @override
     def detect() -> bool:
-        """Returns ``True`` if the current process was launched using Kubeflow PyTorchJob."""
-        required_env_vars = {"KUBERNETES_PORT", "MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE", "RANK"}
-        # torchelastic sets these. Make sure we're not in torchelastic
-        excluded_env_vars = {"GROUP_RANK", "LOCAL_RANK", "LOCAL_WORLD_SIZE"}
-        env_vars = os.environ.keys()
-        return required_env_vars.issubset(env_vars) and excluded_env_vars.isdisjoint(env_vars)
+        raise NotImplementedError("The Kubeflow environment can't be detected automatically.")
 
+    @override
     def world_size(self) -> int:
         return int(os.environ["WORLD_SIZE"])
 
+    @override
     def set_world_size(self, size: int) -> None:
         log.debug("KubeflowEnvironment.set_world_size was called, but setting world size is not allowed. Ignored.")
 
+    @override
     def global_rank(self) -> int:
         return int(os.environ["RANK"])
 
+    @override
     def set_global_rank(self, rank: int) -> None:
         log.debug("KubeflowEnvironment.set_global_rank was called, but setting global rank is not allowed. Ignored.")
 
+    @override
     def local_rank(self) -> int:
         return 0
 
+    @override
     def node_rank(self) -> int:
         return self.global_rank()

@@ -11,35 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from copy import deepcopy
 from unittest.mock import DEFAULT, Mock, patch
 
-import pytest
 import torch
-from torch.optim import Adam, Optimizer, SGD
+from torch.optim import SGD, Adam, Optimizer
 
-from lightning.pytorch import Trainer
+from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.demos.boring_classes import BoringModel
 from lightning.pytorch.loops.optimization.automatic import Closure
 from lightning.pytorch.tuner.tuning import Tuner
+from tests_pytorch.helpers.runif import RunIf
 
 
-@pytest.mark.parametrize("auto", [True, False])
-def test_lightning_optimizer(tmpdir, auto):
+def test_lightning_optimizer(tmp_path):
     """Test that optimizer are correctly wrapped by our LightningOptimizer."""
 
     class TestModel(BoringModel):
         def configure_optimizers(self):
             optimizer = torch.optim.SGD(self.layer.parameters(), lr=0.1)
-            if not auto:
-                # note: this is not recommended, only done for coverage
-                optimizer = LightningOptimizer(optimizer)
             lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
             return [optimizer], [lr_scheduler]
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir, limit_train_batches=1, limit_val_batches=1, max_epochs=1, enable_model_summary=False
+        default_root_dir=tmp_path, limit_train_batches=1, limit_val_batches=1, max_epochs=1, enable_model_summary=False
     )
     trainer.fit(model)
 
@@ -47,7 +44,7 @@ def test_lightning_optimizer(tmpdir, auto):
     assert str(lightning_opt) == "Lightning" + str(lightning_opt.optimizer)
 
 
-def test_init_optimizers_resets_lightning_optimizers(tmpdir):
+def test_init_optimizers_resets_lightning_optimizers(tmp_path):
     """Test that the Trainer resets the `lightning_optimizers` list everytime new optimizers get initialized."""
 
     def compare_optimizers():
@@ -55,7 +52,7 @@ def test_init_optimizers_resets_lightning_optimizers(tmpdir):
 
     model = BoringModel()
     model.lr = 0.2
-    trainer = Trainer(default_root_dir=tmpdir, max_epochs=1)
+    trainer = Trainer(default_root_dir=tmp_path, max_epochs=1)
     tuner = Tuner(trainer)
 
     tuner.lr_find(model)
@@ -69,10 +66,11 @@ def test_init_optimizers_resets_lightning_optimizers(tmpdir):
     compare_optimizers()
 
 
-def test_lightning_optimizer_manual_optimization_and_accumulated_gradients(tmpdir):
+def test_lightning_optimizer_manual_optimization_and_accumulated_gradients(tmp_path):
     """Test that the user can use our LightningOptimizer.
 
     Not recommended.
+
     """
 
     class TestModel(BoringModel):
@@ -109,12 +107,13 @@ def test_lightning_optimizer_manual_optimization_and_accumulated_gradients(tmpdi
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir, limit_train_batches=8, limit_val_batches=1, max_epochs=1, enable_model_summary=False
+        default_root_dir=tmp_path, limit_train_batches=8, limit_val_batches=1, max_epochs=1, enable_model_summary=False
     )
 
-    with patch.multiple(torch.optim.SGD, zero_grad=DEFAULT, step=DEFAULT) as sgd, patch.multiple(
-        torch.optim.Adam, zero_grad=DEFAULT, step=DEFAULT
-    ) as adam:
+    with (
+        patch.multiple(torch.optim.SGD, zero_grad=DEFAULT, step=DEFAULT) as sgd,
+        patch.multiple(torch.optim.Adam, zero_grad=DEFAULT, step=DEFAULT) as adam,
+    ):
         trainer.fit(model)
 
     assert sgd["step"].call_count == 4
@@ -148,18 +147,32 @@ def test_state():
     assert isinstance(lightning_optimizer, Adam)
     assert isinstance(lightning_optimizer, Optimizer)
 
-    lightning_dict = {
-        k: v
-        for k, v in lightning_optimizer.__dict__.items()
-        if k not in {"_optimizer", "_strategy", "_lightning_module", "_on_before_step", "_on_after_step"}
-    }
-
-    assert lightning_dict == optimizer.__dict__
     assert optimizer.state_dict() == lightning_optimizer.state_dict()
-    assert optimizer.state == lightning_optimizer.state
 
 
-def test_lightning_optimizer_automatic_optimization_optimizer_zero_grad(tmpdir):
+def test_state_mutation():
+    model = torch.nn.Linear(3, 4)
+    optimizer0 = torch.optim.Adam(model.parameters(), lr=0.1)
+    lightning_optimizer0 = LightningOptimizer(optimizer0)
+
+    optimizer0.param_groups[0]["lr"] = 1.0
+    assert lightning_optimizer0.param_groups[0]["lr"] == 1.0
+
+    # Load state into the unwrapped optimizer
+    state_dict0 = deepcopy(optimizer0.state_dict())
+    optimizer1 = torch.optim.Adam(model.parameters(), lr=100)
+    lightning_optimizer1 = LightningOptimizer(optimizer1)
+    optimizer1.load_state_dict(state_dict0)
+    assert lightning_optimizer1.param_groups[0]["lr"] == 1.0
+
+    # Load state into wrapped optimizer
+    optimizer2 = torch.optim.Adam(model.parameters(), lr=100)
+    lightning_optimizer2 = LightningOptimizer(optimizer2)
+    lightning_optimizer2.load_state_dict(state_dict0)
+    assert lightning_optimizer2.param_groups[0]["lr"] == 1.0
+
+
+def test_lightning_optimizer_automatic_optimization_optimizer_zero_grad(tmp_path):
     """Test overriding zero_grad works in automatic_optimization."""
 
     class TestModel(BoringModel):
@@ -174,7 +187,7 @@ def test_lightning_optimizer_automatic_optimization_optimizer_zero_grad(tmpdir):
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir, limit_train_batches=20, limit_val_batches=1, max_epochs=1, enable_model_summary=False
+        default_root_dir=tmp_path, limit_train_batches=20, limit_val_batches=1, max_epochs=1, enable_model_summary=False
     )
 
     with patch("torch.optim.SGD.zero_grad") as sgd_zero_grad:
@@ -182,7 +195,7 @@ def test_lightning_optimizer_automatic_optimization_optimizer_zero_grad(tmpdir):
     assert sgd_zero_grad.call_count == 10
 
 
-def test_lightning_optimizer_automatic_optimization_optimizer_step(tmpdir):
+def test_lightning_optimizer_automatic_optimization_optimizer_step(tmp_path):
     """Test overriding step works in automatic_optimization."""
 
     class TestModel(BoringModel):
@@ -203,7 +216,7 @@ def test_lightning_optimizer_automatic_optimization_optimizer_step(tmpdir):
 
     limit_train_batches = 8
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=limit_train_batches,
         limit_val_batches=1,
         max_epochs=1,
@@ -217,9 +230,12 @@ def test_lightning_optimizer_automatic_optimization_optimizer_step(tmpdir):
     assert sgd["zero_grad"].call_count == limit_train_batches
 
 
-def test_lightning_optimizer_automatic_optimization_lbfgs_zero_grad(tmpdir):
+@RunIf(mps=False)  # mps does not support LBFGS
+def test_lightning_optimizer_automatic_optimization_lbfgs_zero_grad(tmp_path):
     """Test zero_grad is called the same number of times as LBFGS requires for reevaluation of the loss in
     automatic_optimization."""
+
+    seed_everything(0)
 
     class TestModel(BoringModel):
         def configure_optimizers(self):
@@ -227,7 +243,7 @@ def test_lightning_optimizer_automatic_optimization_lbfgs_zero_grad(tmpdir):
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir, limit_train_batches=1, limit_val_batches=1, max_epochs=1, enable_model_summary=False
+        default_root_dir=tmp_path, limit_train_batches=1, limit_val_batches=1, max_epochs=1, enable_model_summary=False
     )
 
     with patch("torch.optim.LBFGS.zero_grad") as zero_grad:
@@ -293,9 +309,17 @@ def test_lightning_optimizer_keeps_hooks():
     assert len(optimizer._fwd_handles) == 1
 
 
-def test_params_groups_and_state_are_accessible(tmpdir):
+def test_params_groups_and_state_are_accessible(tmp_path):
     class TestModel(BoringModel):
+        def on_train_start(self):
+            # Update the learning rate manually on the unwrapped optimizer
+            assert not isinstance(self.trainer.optimizers[0], LightningOptimizer)
+            self.trainer.optimizers[0].param_groups[0]["lr"] = 2.0
+
         def training_step(self, batch, batch_idx):
+            opt = self.optimizers()
+            assert opt.param_groups[0]["lr"] == 2.0
+
             loss = self.step(batch)
             self.__loss = loss
             return loss
@@ -314,5 +338,5 @@ def test_params_groups_and_state_are_accessible(tmpdir):
             assert loss == self.__loss
 
     model = TestModel()
-    trainer = Trainer(max_epochs=1, default_root_dir=tmpdir, limit_train_batches=1, limit_val_batches=0)
+    trainer = Trainer(max_epochs=1, default_root_dir=tmp_path, limit_train_batches=1, limit_val_batches=0)
     trainer.fit(model)

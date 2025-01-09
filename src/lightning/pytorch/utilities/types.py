@@ -16,21 +16,33 @@ Convention:
  - Do not include any `_TYPE` suffix
  - Types used in public hooks (as those in the `LightningModule` and `Callback`) should be public (no leading `_`)
 """
+
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Generator, List, Mapping, Optional, Protocol, runtime_checkable, Type, Union
+from typing import (
+    Any,
+    Optional,
+    Protocol,
+    TypedDict,
+    Union,
+    runtime_checkable,
+)
 
 import torch
 from torch import Tensor
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
 from torchmetrics import Metric
+from typing_extensions import NotRequired, Required
 
-from lightning.fabric.utilities.types import _TORCH_LRSCHEDULER, LRScheduler, ProcessGroup, ReduceLROnPlateau
+from lightning.fabric.utilities.types import ProcessGroup
 
 _NUMBER = Union[int, float]
 _METRIC = Union[Metric, Tensor, _NUMBER]
-STEP_OUTPUT = Union[Tensor, Mapping[str, Any]]
-_EVALUATE_OUTPUT = List[Mapping[str, float]]  # 1 dict per DataLoader
-_PREDICT_OUTPUT = Union[List[Any], List[List[Any]]]
+STEP_OUTPUT = Optional[Union[Tensor, Mapping[str, Any]]]
+_EVALUATE_OUTPUT = list[Mapping[str, float]]  # 1 dict per DataLoader
+_PREDICT_OUTPUT = Union[list[Any], list[list[Any]]]
 TRAIN_DATALOADERS = Any  # any iterable or collection of iterables
 EVAL_DATALOADERS = Any  # any iterable or collection of iterables
 
@@ -42,7 +54,7 @@ class DistributedDataParallel(Protocol):
     def __init__(
         self,
         module: torch.nn.Module,
-        device_ids: Optional[List[Union[int, torch.device]]] = None,
+        device_ids: Optional[list[Union[int, torch.device]]] = None,
         output_device: Optional[Union[int, torch.device]] = None,
         dim: int = 0,
         broadcast_buffers: bool = True,
@@ -52,24 +64,22 @@ class DistributedDataParallel(Protocol):
         check_reduction: bool = False,
         gradient_as_bucket_view: bool = False,
         static_graph: bool = False,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @contextmanager
-    def no_sync(self) -> Generator:
-        ...
+    def no_sync(self) -> Generator: ...
 
 
 # todo: improve LRSchedulerType naming/typing
-LRSchedulerTypeTuple = (_TORCH_LRSCHEDULER, torch.optim.lr_scheduler.ReduceLROnPlateau)
-LRSchedulerTypeUnion = Union[_TORCH_LRSCHEDULER, torch.optim.lr_scheduler.ReduceLROnPlateau]
-LRSchedulerType = Union[Type[_TORCH_LRSCHEDULER], Type[torch.optim.lr_scheduler.ReduceLROnPlateau]]
+LRSchedulerTypeTuple = (LRScheduler, ReduceLROnPlateau)
+LRSchedulerTypeUnion = Union[LRScheduler, ReduceLROnPlateau]
+LRSchedulerType = Union[type[LRScheduler], type[ReduceLROnPlateau]]
 LRSchedulerPLType = Union[LRScheduler, ReduceLROnPlateau]
 
 
 @dataclass
 class LRSchedulerConfig:
-    scheduler: Union[_TORCH_LRSCHEDULER, ReduceLROnPlateau]
+    scheduler: Union[LRScheduler, ReduceLROnPlateau]
     # no custom name
     name: Optional[str] = None
     # after epoch is over
@@ -82,3 +92,44 @@ class LRSchedulerConfig:
     monitor: Optional[str] = None
     # enforce that the monitor exists for ReduceLROnPlateau
     strict: bool = True
+
+
+class LRSchedulerConfigType(TypedDict, total=False):
+    scheduler: Required[LRSchedulerTypeUnion]
+    name: Optional[str]
+    interval: str
+    frequency: int
+    reduce_on_plateau: bool
+    monitor: Optional[str]
+    strict: bool
+
+
+class OptimizerConfig(TypedDict):
+    optimizer: Optimizer
+
+
+class OptimizerLRSchedulerConfig(TypedDict):
+    optimizer: Optimizer
+    lr_scheduler: Union[LRSchedulerTypeUnion, LRSchedulerConfigType]
+    monitor: NotRequired[str]
+
+
+OptimizerLRScheduler = Optional[
+    Union[
+        Optimizer,
+        Sequence[Optimizer],
+        tuple[Sequence[Optimizer], Sequence[Union[LRSchedulerTypeUnion, LRSchedulerConfig]]],
+        OptimizerConfig,
+        OptimizerLRSchedulerConfig,
+        Sequence[OptimizerConfig],
+        Sequence[OptimizerLRSchedulerConfig],
+    ]
+]
+
+
+class _SizedIterable(Protocol):
+    def __len__(self) -> int:
+        pass
+
+    def __iter__(self) -> Iterator:
+        pass

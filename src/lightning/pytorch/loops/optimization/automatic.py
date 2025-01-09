@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Callable, Dict, Optional, OrderedDict
+from typing import Any, Callable, Optional
 
 import torch
 from torch import Tensor
 from torch.optim import Optimizer
+from typing_extensions import override
 
 import lightning.pytorch as pl
 from lightning.pytorch.loops.loop import _Loop
@@ -34,17 +37,18 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT
 class ClosureResult(OutputResult):
     """A container to hold the result of a :class:`Closure` call.
 
-    It is created from the output of :meth:`~lightning.pytorch.core.module.LightningModule.training_step`.
+    It is created from the output of :meth:`~lightning.pytorch.core.LightningModule.training_step`.
 
     Attributes:
         closure_loss: The loss with a graph attached.
         loss: A detached copy of the closure loss.
         extra: Any keys other than the loss returned.
+
     """
 
     closure_loss: Optional[Tensor]
     loss: Optional[Tensor] = field(init=False, default=None)
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._clone_loss()
@@ -55,12 +59,10 @@ class ClosureResult(OutputResult):
             self.loss = self.closure_loss.detach().clone()
 
     @classmethod
-    def from_training_step_output(
-        cls, training_step_output: Optional[STEP_OUTPUT], normalize: int = 1
-    ) -> "ClosureResult":
+    def from_training_step_output(cls, training_step_output: STEP_OUTPUT, normalize: int = 1) -> "ClosureResult":
         closure_loss, extra = None, {}
 
-        if isinstance(training_step_output, dict):
+        if isinstance(training_step_output, Mapping):
             closure_loss = training_step_output.get("loss")
             if closure_loss is None:
                 raise MisconfigurationException(
@@ -71,8 +73,8 @@ class ClosureResult(OutputResult):
             closure_loss = training_step_output
         elif training_step_output is not None:
             raise MisconfigurationException(
-                "In automatic optimization, `training_step` must return a Tensor, "
-                "a dict, or None (where the step will be skipped)."
+                "In automatic optimization, `training_step` must return a Tensor, a dict, or None (where the step will"
+                " be skipped)."
             )
 
         if closure_loss is not None:
@@ -82,7 +84,8 @@ class ClosureResult(OutputResult):
 
         return cls(closure_loss, extra=extra)
 
-    def asdict(self) -> Dict[str, Any]:
+    @override
+    def asdict(self) -> dict[str, Any]:
         return {"loss": self.loss, **self.extra}
 
 
@@ -122,6 +125,8 @@ class Closure(AbstractClosure[ClosureResult]):
         self._backward_fn = backward_fn
         self._zero_grad_fn = zero_grad_fn
 
+    @override
+    @torch.enable_grad()
     def closure(self, *args: Any, **kwargs: Any) -> ClosureResult:
         step_output = self._step_fn()
 
@@ -136,12 +141,13 @@ class Closure(AbstractClosure[ClosureResult]):
 
         return step_output
 
+    @override
     def __call__(self, *args: Any, **kwargs: Any) -> Optional[Tensor]:
         self._result = self.closure(*args, **kwargs)
         return self._result.loss
 
 
-_OUTPUTS_TYPE = Dict[str, Any]
+_OUTPUTS_TYPE = dict[str, Any]
 
 
 class _AutomaticOptimization(_Loop):
@@ -154,19 +160,20 @@ class _AutomaticOptimization(_Loop):
         self.optim_progress: _OptimizationProgress = _OptimizationProgress()
         self._skip_backward: bool = False
 
-    def run(self, optimizer: Optimizer, kwargs: OrderedDict) -> _OUTPUTS_TYPE:
+    def run(self, optimizer: Optimizer, batch_idx: int, kwargs: OrderedDict) -> _OUTPUTS_TYPE:
         """Runs closure (train step + backward) together with optimization if necessary.
 
         Args:
             kwargs: the kwargs passed down to the hooks
+            batch_idx: the current batch index.
             optimizer: the optimizer
+
         """
-        closure = self._make_closure(kwargs, optimizer)
+        closure = self._make_closure(kwargs, optimizer, batch_idx)
 
         if (
             # when the strategy handles accumulation, we want to always call the optimizer step
-            not self.trainer.strategy.handles_gradient_accumulation
-            and self.trainer.fit_loop._should_accumulate()
+            not self.trainer.strategy.handles_gradient_accumulation and self.trainer.fit_loop._should_accumulate()
         ):
             # For gradient accumulation
 
@@ -182,19 +189,19 @@ class _AutomaticOptimization(_Loop):
         # ------------------------------
         # gradient update with accumulated gradients
         else:
-            self._optimizer_step(kwargs.get("batch_idx", 0), closure)
+            self._optimizer_step(batch_idx, closure)
 
         result = closure.consume_result()
         if result.loss is None:
             return {}
         return result.asdict()
 
-    def _make_closure(self, kwargs: OrderedDict, optimizer: Optimizer) -> Closure:
+    def _make_closure(self, kwargs: OrderedDict, optimizer: Optimizer, batch_idx: int) -> Closure:
         """Build a closure object that captures the given arguments and runs the `training_step` function and
         optionally other functions such as `backward` and `zero_grad`."""
         step_fn = self._make_step_fn(kwargs)
         backward_fn = self._make_backward_fn(optimizer)
-        zero_grad_fn = self._make_zero_grad_fn(kwargs.get("batch_idx", 0), optimizer)
+        zero_grad_fn = self._make_zero_grad_fn(batch_idx, optimizer)
         return Closure(step_fn=step_fn, backward_fn=backward_fn, zero_grad_fn=zero_grad_fn)
 
     def _make_step_fn(self, kwargs: OrderedDict) -> Callable[[], ClosureResult]:
@@ -205,6 +212,7 @@ class _AutomaticOptimization(_Loop):
         """Build a `zero_grad` function that zeroes the gradients before back-propagation.
 
         Returns ``None`` in the case backward needs to be skipped.
+
         """
         if self._skip_backward:
             return None
@@ -220,10 +228,11 @@ class _AutomaticOptimization(_Loop):
         return zero_grad_fn
 
     def _make_backward_fn(self, optimizer: Optimizer) -> Optional[Callable[[Tensor], None]]:
-        """Build a `backward` function that handles back-propagation through the output produced by the
-        `training_step` function.
+        """Build a `backward` function that handles back-propagation through the output produced by the `training_step`
+        function.
 
         Returns ``None`` in the case backward needs to be skipped.
+
         """
         if self._skip_backward:
             return None
@@ -244,6 +253,7 @@ class _AutomaticOptimization(_Loop):
             batch_idx: the index of the current batch
             train_step_and_backward_closure: the closure function performing the train step and computing the
                 gradients. By default, called by the optimizer (if possible)
+
         """
         trainer = self.trainer
 
@@ -274,6 +284,7 @@ class _AutomaticOptimization(_Loop):
 
         Args:
             optimizer: the current optimizer
+
         """
         trainer = self.trainer
         self.optim_progress.optimizer.zero_grad.increment_ready()
@@ -287,6 +298,7 @@ class _AutomaticOptimization(_Loop):
         Args:
             batch_idx: the index of the current batch
             optimizer: the current optimizer
+
         """
         trainer = self.trainer
         call._call_lightning_module_hook(trainer, "optimizer_zero_grad", trainer.current_epoch, batch_idx, optimizer)
@@ -300,11 +312,18 @@ class _AutomaticOptimization(_Loop):
 
         Returns:
             A ``ClosureResult`` containing the training step output.
+
         """
         trainer = self.trainer
 
-        # manually capture logged metrics
         training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
         self.trainer.strategy.post_training_step()  # unused hook - call anyway for backward compatibility
+
+        if training_step_output is None and trainer.world_size > 1:
+            raise RuntimeError(
+                "Skipping the `training_step` by returning None in distributed training is not supported."
+                " It is recommended that you rewrite your training logic to avoid having to skip the step in the first"
+                " place."
+            )
 
         return self.output_result_cls.from_training_step_output(training_step_output, trainer.accumulate_grad_batches)

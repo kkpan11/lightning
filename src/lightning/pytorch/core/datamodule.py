@@ -12,24 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """LightningDataModule for loading DataLoaders with ease."""
+
 import inspect
-from typing import Any, cast, Dict, IO, Iterable, Optional, Union
+import os
+from collections.abc import Iterable, Sized
+from typing import IO, Any, Optional, Union, cast
 
 from lightning_utilities import apply_to_collection
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 from typing_extensions import Self
 
 import lightning.pytorch as pl
-from lightning.fabric.utilities.types import _PATH
+from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.core.hooks import DataHooks
 from lightning.pytorch.core.mixins import HyperparametersMixin
 from lightning.pytorch.core.saving import _load_from_checkpoint
+from lightning.pytorch.utilities.model_helpers import _restricted_classmethod
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 
 
 class LightningDataModule(DataHooks, HyperparametersMixin):
-    """A DataModule standardizes the training, val, test splits, data preparation and transforms. The main
-    advantage is consistent data splits, data preparation and transforms across models.
+    """A DataModule standardizes the training, val, test splits, data preparation and transforms. The main advantage is
+    consistent data splits, data preparation and transforms across models.
 
     Example::
 
@@ -47,7 +51,9 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
                 # make assignments here (val/train/test split)
                 # called on every process in DDP
                 dataset = RandomDataset(1, 100)
-                self.train, self.val, self.test = data.random_split(dataset, [80, 10, 10])
+                self.train, self.val, self.test = data.random_split(
+                    dataset, [80, 10, 10], generator=torch.Generator().manual_seed(42)
+                )
 
             def train_dataloader(self):
                 return data.DataLoader(self.train)
@@ -58,10 +64,15 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
             def test_dataloader(self):
                 return data.DataLoader(self.test)
 
+            def on_exception(self, exception):
+                # clean up state after the trainer faced an exception
+                ...
+
             def teardown(self):
                 # clean up state after the trainer stops, delete files...
                 # called on every process in DDP
                 ...
+
     """
 
     name: Optional[str] = None
@@ -72,7 +83,7 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
     def __init__(self) -> None:
         super().__init__()
         # Pointer to the trainer object
-        self.trainer: Optional["pl.Trainer"] = None
+        self.trainer: Optional[pl.Trainer] = None
 
     @classmethod
     def from_datasets(
@@ -98,6 +109,7 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
                 data will be loaded in the main process. Number of CPUs available. This parameter gets forwarded to the
                 ``__init__`` if the datamodule has such a name defined in its signature.
             **datamodule_kwargs: Additional parameters that get passed down to the datamodule's ``__init__``.
+
         """
 
         def dataloader(ds: Dataset, shuffle: bool = False) -> DataLoader:
@@ -137,37 +149,47 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
             datamodule.predict_dataloader = predict_dataloader  # type: ignore[method-assign]
         return datamodule
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         """Called when saving a checkpoint, implement to generate and save datamodule state.
 
         Returns:
             A dictionary containing datamodule state.
+
         """
         return {}
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Called when loading a checkpoint, implement to reload datamodule state given datamodule state_dict.
 
         Args:
             state_dict: the datamodule state returned by ``state_dict``.
+
         """
         pass
 
-    @classmethod
+    def on_exception(self, exception: BaseException) -> None:
+        """Called when the trainer execution is interrupted by an exception."""
+        pass
+
+    @_restricted_classmethod
     def load_from_checkpoint(
         cls,
         checkpoint_path: Union[_PATH, IO],
+        map_location: _MAP_LOCATION_TYPE = None,
         hparams_file: Optional[_PATH] = None,
         **kwargs: Any,
     ) -> Self:
-        r"""
-        Primary way of loading a datamodule from a checkpoint. When Lightning saves a checkpoint
-        it stores the arguments passed to ``__init__``  in the checkpoint under ``"datamodule_hyper_parameters"``.
+        r"""Primary way of loading a datamodule from a checkpoint. When Lightning saves a checkpoint it stores the
+        arguments passed to ``__init__``  in the checkpoint under ``"datamodule_hyper_parameters"``.
 
         Any arguments specified through \*\*kwargs will override args stored in ``"datamodule_hyper_parameters"``.
 
         Args:
             checkpoint_path: Path to checkpoint. This can also be a URL, or file-like object
+            map_location:
+                If your checkpoint saved a GPU model and you now load on CPUs
+                or a different number of GPUs, use this to map to the new setup.
+                The behaviour is the same as in :func:`torch.load`.
             hparams_file: Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure
                 as in this example::
 
@@ -191,8 +213,9 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
             :class:`LightningDataModule` instance with loaded weights and hyperparameters (if available).
 
         Note:
-            ``load_from_checkpoint`` is a **class** method. You should use your :class:`LightningDataModule`
-            **class** to call it instead of the :class:`LightningDataModule` instance.
+            ``load_from_checkpoint`` is a **class** method. You must use your :class:`LightningDataModule`
+            **class** to call it instead of the :class:`LightningDataModule` instance, or a
+            ``TypeError`` will be raised.
 
         Example::
 
@@ -216,9 +239,81 @@ class LightningDataModule(DataHooks, HyperparametersMixin):
         loaded = _load_from_checkpoint(
             cls,
             checkpoint_path,
-            map_location=None,
+            map_location=map_location,
             hparams_file=hparams_file,
             strict=None,
             **kwargs,
         )
         return cast(Self, loaded)
+
+    def __str__(self) -> str:
+        """Return a string representation of the datasets that are set up.
+
+        Returns:
+            A string representation of the datasets that are setup.
+
+        """
+
+        class dataset_info:
+            def __init__(self, available: bool, length: str) -> None:
+                self.available = available
+                self.length = length
+
+        def retrieve_dataset_info(loader: DataLoader) -> dataset_info:
+            """Helper function to compute dataset information."""
+            dataset = loader.dataset
+            size: str = str(len(dataset)) if isinstance(dataset, Sized) else "NA"
+
+            return dataset_info(True, size)
+
+        def loader_info(
+            loader: Union[DataLoader, Iterable[DataLoader]],
+        ) -> Union[dataset_info, Iterable[dataset_info]]:
+            """Helper function to compute dataset information."""
+            return apply_to_collection(loader, DataLoader, retrieve_dataset_info)
+
+        def extract_loader_info(methods: list[tuple[str, str]]) -> dict:
+            """Helper function to extract information for each dataloader method."""
+            info: dict[str, Union[dataset_info, Iterable[dataset_info]]] = {}
+            for loader_name, func_name in methods:
+                loader_method = getattr(self, func_name, None)
+
+                try:
+                    loader = loader_method()  # type: ignore
+                    info[loader_name] = loader_info(loader)
+                except Exception:
+                    info[loader_name] = dataset_info(False, "")
+
+            return info
+
+        def format_loader_info(info: dict[str, Union[dataset_info, Iterable[dataset_info]]]) -> str:
+            """Helper function to format loader information."""
+            output = []
+            for loader_name, loader_info in info.items():
+                # Single dataset
+                if isinstance(loader_info, dataset_info):
+                    loader_info_formatted = "None" if not loader_info.available else f"size={loader_info.length}"
+                # Iterable of datasets
+                else:
+                    loader_info_formatted = " ; ".join(
+                        "None" if not loader_info_i.available else f"{i}. size={loader_info_i.length}"
+                        for i, loader_info_i in enumerate(loader_info, start=1)
+                    )
+
+                output.append(f"{{{loader_name}: {loader_info_formatted}}}")
+
+            return os.linesep.join(output)
+
+        # Available dataloader methods
+        datamodule_loader_methods: list[tuple[str, str]] = [
+            ("Train dataloader", "train_dataloader"),
+            ("Validation dataloader", "val_dataloader"),
+            ("Test dataloader", "test_dataloader"),
+            ("Predict dataloader", "predict_dataloader"),
+        ]
+
+        # Retrieve information for each dataloader method
+        dataloader_info = extract_loader_info(datamodule_loader_methods)
+        # Format the information
+        dataloader_str = format_loader_info(dataloader_info)
+        return dataloader_str

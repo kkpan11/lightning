@@ -1,7 +1,7 @@
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Any, cast, Iterable, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal, Optional, Union, cast
 
 import torch
 from lightning_utilities import apply_to_collection
@@ -20,11 +20,11 @@ class MyCustomTrainer:
         self,
         accelerator: Union[str, Accelerator] = "auto",
         strategy: Union[str, Strategy] = "auto",
-        devices: Union[List[int], str, int] = "auto",
+        devices: Union[list[int], str, int] = "auto",
         precision: Union[str, int] = "32-true",
         plugins: Optional[Union[str, Any]] = None,
-        callbacks: Optional[Union[List[Any], Any]] = None,
-        loggers: Optional[Union[Logger, List[Logger]]] = None,
+        callbacks: Optional[Union[list[Any], Any]] = None,
+        loggers: Optional[Union[Logger, list[Logger]]] = None,
         max_epochs: Optional[int] = 1000,
         max_steps: Optional[int] = None,
         grad_accum_steps: int = 1,
@@ -84,6 +84,7 @@ class MyCustomTrainer:
 
         Warning:
             callbacks written for the lightning trainer (especially making assumptions on the trainer), won't work!
+
         """
 
         self.fabric = L.Fabric(
@@ -137,6 +138,7 @@ class MyCustomTrainer:
                 If not specified, no validation will run.
             ckpt_path: Path to previous checkpoints to resume training from.
                 If specified, will always look for the latest checkpoint within the given directory.
+
         """
         self.fabric.launch()
 
@@ -204,9 +206,11 @@ class MyCustomTrainer:
             optimizer: the optimizer, optimizing the LightningModule.
             train_loader: The dataloader yielding the training batches.
             limit_batches: Limits the batches during this training epoch.
-                If greater then the number of batches in the ``train_loader``, this has no effect.
+                If greater than the number of batches in the ``train_loader``, this has no effect.
             scheduler_cfg: The learning rate scheduler configuration.
-                Have a look at :meth:`lightning.pytorch.LightninModule.configure_optimizers` for supported values.
+                Have a look at :meth:`~lightning.pytorch.core.LightningModule.configure_optimizers`
+                for supported values.
+
         """
         self.fabric.call("on_train_epoch_start")
         iterable = self.progbar_wrapper(
@@ -216,8 +220,7 @@ class MyCustomTrainer:
         for batch_idx, batch in enumerate(iterable):
             # end epoch if stopping training completely or max batches for this epoch reached
             if self.should_stop or batch_idx >= limit_batches:
-                self.fabric.call("on_train_epoch_end")
-                return
+                break
 
             self.fabric.call("on_train_batch_start", batch, batch_idx)
 
@@ -225,7 +228,7 @@ class MyCustomTrainer:
             should_optim_step = self.global_step % self.grad_accum_steps == 0
             if should_optim_step:
                 # currently only supports a single optimizer
-                self.fabric.call("on_before_optimizer_step", optimizer, 0)
+                self.fabric.call("on_before_optimizer_step", optimizer)
 
                 # optimizer step runs train step internally through closure
                 optimizer.step(partial(self.training_step, model=model, batch=batch, batch_idx=batch_idx))
@@ -262,13 +265,14 @@ class MyCustomTrainer:
         val_loader: Optional[torch.utils.data.DataLoader],
         limit_batches: Union[int, float] = float("inf"),
     ):
-        """The validation loop ruunning a single validation epoch.
+        """The validation loop running a single validation epoch.
 
         Args:
             model: the LightningModule to evaluate
             val_loader: The dataloader yielding the validation batches.
             limit_batches: Limits the batches during this validation epoch.
-                If greater then the number of batches in the ``val_loader``, this has no effect.
+                If greater than the number of batches in the ``val_loader``, this has no effect.
+
         """
         # no validation if val_loader wasn't passed
         if val_loader is None:
@@ -282,7 +286,10 @@ class MyCustomTrainer:
             )
             return
 
-        self.fabric.call("on_validation_model_eval")  # calls `model.eval()`
+        if not is_overridden("on_validation_model_eval", _unwrap_objects(model)):
+            model.eval()
+        else:
+            self.fabric.call("on_validation_model_eval")  # calls `model.eval()`
 
         torch.set_grad_enabled(False)
 
@@ -293,8 +300,7 @@ class MyCustomTrainer:
         for batch_idx, batch in enumerate(iterable):
             # end epoch if stopping training completely or max batches for this epoch reached
             if self.should_stop or batch_idx >= limit_batches:
-                self.fabric.call("on_validation_epoch_end")
-                return
+                break
 
             self.fabric.call("on_validation_batch_start", batch, batch_idx)
 
@@ -309,17 +315,21 @@ class MyCustomTrainer:
 
         self.fabric.call("on_validation_epoch_end")
 
-        self.fabric.call("on_validation_model_train")
+        if not is_overridden("on_validation_model_train", _unwrap_objects(model)):
+            model.train()
+        else:
+            self.fabric.call("on_validation_model_train")
         torch.set_grad_enabled(True)
 
     def training_step(self, model: L.LightningModule, batch: Any, batch_idx: int) -> torch.Tensor:
-        """A single training step, running forward and backward. The optimizer step is called separately, as this
-        is given as a closure to the optimizer step.
+        """A single training step, running forward and backward. The optimizer step is called separately, as this is
+        given as a closure to the optimizer step.
 
         Args:
             model: the lightning module to train
             batch: the batch to run the forward on
             batch_idx: index of the current batch w.r.t the current epoch
+
         """
         outputs: Union[torch.Tensor, Mapping[str, Any]] = model.training_step(batch, batch_idx=batch_idx)
 
@@ -346,9 +356,10 @@ class MyCustomTrainer:
         Args:
             model: The LightningModule to train
             scheduler_cfg: The learning rate scheduler configuration.
-                Have a look at :meth:`lightning.pytorch.LightninModule.configure_optimizers` for supported values.
+                Have a look at :meth:`lightning.pytorch.LightningModule.configure_optimizers` for supported values.
             level: whether we are trying to step on epoch- or step-level
             current_value: Holds the current_epoch if ``level==epoch``, else holds the ``global_step``
+
         """
 
         # no scheduler
@@ -397,6 +408,7 @@ class MyCustomTrainer:
         Args:
             iterable: the iterable to wrap with tqdm
             total: the total length of the iterable, necessary in case the number of batches was limited.
+
         """
         if self.fabric.is_global_zero:
             return tqdm(iterable, total=total, **kwargs)
@@ -408,6 +420,7 @@ class MyCustomTrainer:
         Args:
             state: a mapping contaning model, optimizer and lr scheduler
             path: the path to load the checkpoint from
+
         """
         if state is None:
             state = {}
@@ -424,6 +437,7 @@ class MyCustomTrainer:
 
         Args:
             state: A mapping containing model, optimizer and lr scheduler.
+
         """
         if state is None:
             state = {}
@@ -438,6 +452,7 @@ class MyCustomTrainer:
 
         Args:
             checkpoint_dir: the directory to search for checkpoints
+
         """
         if not os.path.isdir(checkpoint_dir):
             return None
@@ -451,7 +466,7 @@ class MyCustomTrainer:
 
     def _parse_optimizers_schedulers(
         self, configure_optim_output
-    ) -> Tuple[
+    ) -> tuple[
         Optional[L.fabric.utilities.types.Optimizable],
         Optional[Mapping[str, Union[L.fabric.utilities.types.LRScheduler, bool, str, int]]],
     ]:
@@ -460,6 +475,7 @@ class MyCustomTrainer:
         Args:
             configure_optim_output: The output of ``configure_optimizers``.
                 For supported values, please refer to :meth:`lightning.pytorch.LightningModule.configure_optimizers`.
+
         """
         _lr_sched_defaults = {"interval": "epoch", "frequency": 1, "monitor": "val_loss"}
 
@@ -513,6 +529,7 @@ class MyCustomTrainer:
             prog_bar: a progressbar (on global rank zero) or an iterable (every other rank).
             candidates: the values to add as postfix strings to the progressbar.
             prefix: the prefix to add to each of these values.
+
         """
         if isinstance(prog_bar, tqdm) and candidates is not None:
             postfix_str = ""

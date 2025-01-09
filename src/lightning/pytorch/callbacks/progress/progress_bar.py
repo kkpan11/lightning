@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
+
+from typing_extensions import override
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import Callback
@@ -19,9 +21,9 @@ from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
 
 class ProgressBar(Callback):
-    r"""The base class for progress bars in Lightning. It is a :class:`~lightning.pytorch.callbacks.Callback` that
-    keeps track of the batch progress in the :class:`~lightning.pytorch.trainer.trainer.Trainer`. You should
-    implement your highly custom progress bars with this as the base class.
+    r"""The base class for progress bars in Lightning. It is a :class:`~lightning.pytorch.callbacks.Callback` that keeps
+    track of the batch progress in the :class:`~lightning.pytorch.trainer.trainer.Trainer`. You should implement your
+    highly custom progress bars with this as the base class.
 
     Example::
 
@@ -34,18 +36,19 @@ class ProgressBar(Callback):
             def disable(self):
                 self.enable = False
 
-            def on_train_batch_end(self, trainer, pl_module, outputs, batch_idx):
-                super().on_train_batch_end(trainer, pl_module, outputs, batch_idx)  # don't forget this :)
-                percent = (self.train_batch_idx / self.total_train_batches) * 100
+            def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+                super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)  # don't forget this :)
+                percent = (batch_idx / self.total_train_batches) * 100
                 sys.stdout.flush()
                 sys.stdout.write(f'{percent:.01f} percent complete \r')
 
         bar = LitProgressBar()
         trainer = Trainer(callbacks=[bar])
+
     """
 
     def __init__(self) -> None:
-        self._trainer: Optional["pl.Trainer"] = None
+        self._trainer: Optional[pl.Trainer] = None
         self._current_eval_dataloader_idx: Optional[int] = None
 
     @property
@@ -80,6 +83,7 @@ class ProgressBar(Callback):
 
         Use this to set the total number of iterations in the progress bar. Can return ``inf`` if the training
         dataloader is of infinite size.
+
         """
         return self.trainer.num_training_batches
 
@@ -89,6 +93,7 @@ class ProgressBar(Callback):
 
         Use this to set the total number of iterations in the progress bar. Can return ``inf`` if the validation
         dataloader is of infinite size.
+
         """
         batches = self.trainer.num_sanity_val_batches if self.trainer.sanity_checking else self.trainer.num_val_batches
         if isinstance(batches, list):
@@ -102,6 +107,7 @@ class ProgressBar(Callback):
 
         Use this to set the total number of iterations in the progress bar. Can return ``inf`` if the test dataloader is
         of infinite size.
+
         """
         batches = self.trainer.num_test_batches
         if isinstance(batches, list):
@@ -115,6 +121,7 @@ class ProgressBar(Callback):
 
         Use this to set the total number of iterations in the progress bar. Can return ``inf`` if the predict dataloader
         is of infinite size.
+
         """
         assert self._current_eval_dataloader_idx is not None
         return self.trainer.num_predict_batches[self._current_eval_dataloader_idx]
@@ -125,6 +132,7 @@ class ProgressBar(Callback):
 
         Use this to set the total number of iterations in the progress bar. Can return ``inf`` if the predict dataloader
         is of infinite size.
+
         """
         if not self.trainer.fit_loop.epoch_loop._should_check_val_epoch():
             return 0
@@ -152,6 +160,7 @@ class ProgressBar(Callback):
         The :class:`~lightning.pytorch.trainer.trainer.Trainer` will call this in e.g. pre-training
         routines like the :ref:`learning rate finder <advanced/training_tricks:Learning Rate Finder>`.
         to temporarily enable and disable the training progress bar.
+
         """
         raise NotImplementedError
 
@@ -159,6 +168,7 @@ class ProgressBar(Callback):
         """You should provide a way to print without breaking the progress bar."""
         print(*args, **kwargs)
 
+    @override
     def setup(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", stage: str) -> None:
         self._trainer = trainer
         if not trainer.is_global_zero:
@@ -166,9 +176,9 @@ class ProgressBar(Callback):
 
     def get_metrics(
         self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
-    ) -> Dict[str, Union[int, str, float, Dict[str, float]]]:
-        r"""Combines progress bar metrics collected from the trainer with standard metrics from
-        get_standard_metrics. Implement this to override the items displayed in the progress bar.
+    ) -> dict[str, Union[int, str, float, dict[str, float]]]:
+        r"""Combines progress bar metrics collected from the trainer with standard metrics from get_standard_metrics.
+        Implement this to override the items displayed in the progress bar.
 
         Here is an example of how to override the defaults:
 
@@ -182,6 +192,7 @@ class ProgressBar(Callback):
 
         Return:
             Dictionary with the items to be displayed in the progress bar.
+
         """
         standard_metrics = get_standard_metrics(trainer)
         pbar_metrics = trainer.progress_bar_metrics
@@ -196,7 +207,7 @@ class ProgressBar(Callback):
         return {**standard_metrics, **pbar_metrics}
 
 
-def get_standard_metrics(trainer: "pl.Trainer") -> Dict[str, Union[int, str]]:
+def get_standard_metrics(trainer: "pl.Trainer") -> dict[str, Union[int, str]]:
     r"""Returns the standard metrics displayed in the progress bar. Currently, it only includes the version of the
     experiment when using a logger.
 
@@ -206,12 +217,13 @@ def get_standard_metrics(trainer: "pl.Trainer") -> Dict[str, Union[int, str]]:
 
     Return:
         Dictionary with the standard metrics to be displayed in the progress bar.
+
     """
-    items_dict: Dict[str, Union[int, str]] = {}
+    items_dict: dict[str, Union[int, str]] = {}
     if trainer.loggers:
         from lightning.pytorch.loggers.utilities import _version
 
-        if (version := _version(trainer.loggers)) is not None:
+        if (version := _version(trainer.loggers)) not in ("", None):
             if isinstance(version, str):
                 # show last 4 places of long version strings
                 version = version[-4:]

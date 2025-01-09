@@ -2,7 +2,7 @@ import base64
 from dataclasses import dataclass
 from io import BytesIO
 from os import path
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ import torchvision
 import torchvision.transforms as T
 from PIL import Image as PILImage
 
-from lightning.pytorch import cli_lightning_logo, LightningDataModule, LightningModule
+from lightning.pytorch import LightningDataModule, LightningModule, cli_lightning_logo
 from lightning.pytorch.cli import LightningCLI
 from lightning.pytorch.serve import ServableModule, ServableModuleValidator
 from lightning.pytorch.utilities.model_helpers import get_torchvision_model
@@ -94,7 +94,7 @@ class ProductionReadyModel(LitModule, ServableModule):
     def configure_serialization(self):
         return {"x": Image(224, 224).deserialize}, {"output": Top1().serialize}
 
-    def serve_step(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def serve_step(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"output": self.model(x)}
 
     def configure_response(self):

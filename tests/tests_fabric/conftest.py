@@ -13,24 +13,33 @@
 # limitations under the License.
 import os
 import sys
-from typing import List
+import threading
+from concurrent.futures.process import _ExecutorManagerThread
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import torch.distributed
 
 import lightning.fabric
+from lightning.fabric.accelerators import XLAAccelerator
+from lightning.fabric.strategies.launchers.subprocess_script import _ChildProcessObserver
+from lightning.fabric.utilities.distributed import _destroy_dist_connection
 
 
 @pytest.fixture(autouse=True)
 def preserve_global_rank_variable():
     """Ensures that the rank_zero_only.rank global variable gets reset in each test."""
-    from lightning.fabric.utilities.rank_zero import rank_zero_only
+    from lightning_utilities.core.rank_zero import rank_zero_only as rank_zero_only_utilities
 
-    rank = getattr(rank_zero_only, "rank", None)
+    from lightning.fabric.utilities.rank_zero import rank_zero_only as rank_zero_only_fabric
+
+    functions = (rank_zero_only_fabric, rank_zero_only_utilities)
+    ranks = [getattr(fn, "rank", None) for fn in functions]
     yield
-    if rank is not None:
-        setattr(rank_zero_only, "rank", rank)
+    for fn, rank in zip(functions, ranks):
+        if rank is not None:
+            setattr(fn, "rank", rank)
 
 
 @pytest.fixture(autouse=True)
@@ -54,9 +63,12 @@ def restore_env_variables():
         "PL_GLOBAL_SEED",
         "PL_SEED_WORKERS",
         "RANK",  # set by DeepSpeed
-        "POPLAR_ENGINE_OPTIONS",  # set by IPUStrategy
-        "CUDA_MODULE_LOADING",  # leaked since PyTorch 1.13
+        "CUDA_MODULE_LOADING",  # leaked by PyTorch
         "CRC32C_SW_MODE",  # set by tensorboardX
+        "OMP_NUM_THREADS",  # set by our launchers
+        # set by torchdynamo
+        "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
     }
     leaked_vars.difference_update(allowlist)
     assert not leaked_vars, f"test is leaking environment variable(s): {set(leaked_vars)}"
@@ -66,11 +78,57 @@ def restore_env_variables():
 def teardown_process_group():
     """Ensures that the distributed process group gets closed before the next test runs."""
     yield
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    _destroy_dist_connection()
 
 
-@pytest.fixture()
+@pytest.fixture(autouse=True)
+def thread_police_duuu_daaa_duuu_daaa():
+    """Attempts to stop left-over threads to avoid test interactions."""
+    active_threads_before = set(threading.enumerate())
+    yield
+    active_threads_after = set(threading.enumerate())
+
+    if XLAAccelerator.is_available():
+        # Ignore the check when running XLA tests for now
+        return
+
+    for thread in active_threads_after - active_threads_before:
+        stop = getattr(thread, "stop", None) or getattr(thread, "exit", None)
+        if thread.daemon and callable(stop):
+            # A daemon thread would anyway be stopped at the end of a program
+            # We do it preemptively here to reduce the risk of interactions with other tests that run after
+            stop()
+            assert not thread.is_alive()
+        elif isinstance(thread, _ChildProcessObserver):
+            thread.join(timeout=10)
+        elif (
+            thread.name == "QueueFeederThread"  # tensorboardX
+            or thread.name == "QueueManagerThread"  # torch.compile
+            or "(_read_thread)" in thread.name  # torch.compile
+        ):
+            thread.join(timeout=20)
+        elif (
+            sys.version_info >= (3, 9)
+            and isinstance(thread, _ExecutorManagerThread)
+            or "ThreadPoolExecutor-" in thread.name
+        ):
+            # probably `torch.compile`, can't narrow it down further
+            continue
+        else:
+            raise AssertionError(f"Test left zombie thread: {thread}")
+
+
+@pytest.fixture(autouse=True)
+def reset_in_fabric_backward():
+    """Ensures that the wrappers.in_fabric_backward global variable gets reset after each test."""
+    import lightning.fabric.wrappers as wrappers
+
+    assert hasattr(wrappers, "_in_fabric_backward")
+    yield
+    wrappers._in_fabric_backward = False
+
+
+@pytest.fixture
 def reset_deterministic_algorithm():
     """Ensures that torch determinism settings are reset before the next test runs."""
     yield
@@ -78,7 +136,7 @@ def reset_deterministic_algorithm():
     torch.use_deterministic_algorithms(False)
 
 
-@pytest.fixture()
+@pytest.fixture
 def reset_cudnn_benchmark():
     """Ensures that the `torch.backends.cudnn.benchmark` setting gets reset before the next test runs."""
     yield
@@ -89,12 +147,17 @@ def mock_xla_available(monkeypatch: pytest.MonkeyPatch, value: bool = True) -> N
     monkeypatch.setattr(lightning.fabric.accelerators.xla, "_XLA_AVAILABLE", value)
     monkeypatch.setattr(lightning.fabric.plugins.environments.xla, "_XLA_AVAILABLE", value)
     monkeypatch.setattr(lightning.fabric.plugins.precision.xla, "_XLA_AVAILABLE", value)
+    monkeypatch.setattr(lightning.fabric.plugins.io.xla, "_XLA_AVAILABLE", value)
     monkeypatch.setattr(lightning.fabric.strategies.single_xla, "_XLA_AVAILABLE", value)
-    monkeypatch.setattr(lightning.fabric.strategies.xla, "_XLA_AVAILABLE", value)
+    monkeypatch.setattr(lightning.fabric.strategies.xla_fsdp, "_XLA_AVAILABLE", value)
     monkeypatch.setattr(lightning.fabric.strategies.launchers.xla, "_XLA_AVAILABLE", value)
+    monkeypatch.setitem(sys.modules, "torch_xla", Mock())
+    monkeypatch.setitem(sys.modules, "torch_xla.core.xla_model", Mock())
+    monkeypatch.setitem(sys.modules, "torch_xla.experimental", Mock())
+    monkeypatch.setitem(sys.modules, "torch_xla.distributed.fsdp.wrap", Mock())
 
 
-@pytest.fixture()
+@pytest.fixture
 def xla_available(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_xla_available(monkeypatch)
 
@@ -103,21 +166,19 @@ def mock_tpu_available(monkeypatch: pytest.MonkeyPatch, value: bool = True) -> N
     mock_xla_available(monkeypatch, value)
     monkeypatch.setattr(lightning.fabric.accelerators.xla.XLAAccelerator, "is_available", lambda: value)
     monkeypatch.setattr(lightning.fabric.accelerators.xla.XLAAccelerator, "auto_device_count", lambda *_: 8)
-    monkeypatch.setitem(sys.modules, "torch_xla", Mock())
-    monkeypatch.setitem(sys.modules, "torch_xla.core.xla_model", Mock())
-    monkeypatch.setitem(sys.modules, "torch_xla.experimental", Mock())
 
 
-@pytest.fixture()
+@pytest.fixture
 def tpu_available(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_tpu_available(monkeypatch)
 
 
-@pytest.fixture()
+@pytest.fixture
 def caplog(caplog):
     """Workaround for https://github.com/pytest-dev/pytest/issues/3697.
 
     Setting ``filterwarnings`` with pytest breaks ``caplog`` when ``not logger.propagate``.
+
     """
     import logging
 
@@ -128,7 +189,18 @@ def caplog(caplog):
     lightning_logger.propagate = propagate
 
 
-def pytest_collection_modifyitems(items: List[pytest.Function], config: pytest.Config) -> None:
+@pytest.fixture(autouse=True)
+def leave_no_artifacts_behind():
+    tests_root = Path(__file__).parent.parent
+    files_before = {p for p in tests_root.rglob("*") if "__pycache__" not in p.parts}
+    yield
+    files_after = {p for p in tests_root.rglob("*") if "__pycache__" not in p.parts}
+    difference = files_after - files_before
+    difference = {str(f.relative_to(tests_root)) for f in difference}
+    assert not difference, f"Test left artifacts behind: {difference}"
+
+
+def pytest_collection_modifyitems(items: list[pytest.Function], config: pytest.Config) -> None:
     """An adaptation of `tests/tests_pytorch/conftest.py::pytest_collection_modifyitems`"""
     initial_size = len(items)
     conditions = []
@@ -146,22 +218,23 @@ def pytest_collection_modifyitems(items: List[pytest.Function], config: pytest.C
 
     for kwarg, env_var in options.items():
         # this will compute the intersection of all tests selected per environment variable
-        if os.getenv(env_var, "0") == "1":
-            conditions.append(env_var)
-            for i, test in reversed(list(enumerate(items))):  # loop in reverse, since we are going to pop items
-                already_skipped = any(marker.name == "skip" for marker in test.own_markers)
-                if already_skipped:
-                    # the test was going to be skipped anyway, filter it out
-                    items.pop(i)
-                    skipped += 1
-                    continue
-                has_runif_with_kwarg = any(
-                    marker.name == "skipif" and marker.kwargs.get(kwarg) for marker in test.own_markers
-                )
-                if not has_runif_with_kwarg:
-                    # the test has `@RunIf(kwarg=True)`, filter it out
-                    items.pop(i)
-                    filtered += 1
+        if os.getenv(env_var, "0") != "1":
+            continue
+        conditions.append(env_var)
+        for i, test in reversed(list(enumerate(items))):  # loop in reverse, since we are going to pop items
+            already_skipped = any(marker.name == "skip" for marker in test.own_markers)
+            if already_skipped:
+                # the test was going to be skipped anyway, filter it out
+                items.pop(i)
+                skipped += 1
+                continue
+            has_runif_with_kwarg = any(
+                marker.name == "skipif" and marker.kwargs.get(kwarg) for marker in test.own_markers
+            )
+            if not has_runif_with_kwarg:
+                # the test has `@RunIf(kwarg=True)`, filter it out
+                items.pop(i)
+                filtered += 1
 
     if config.option.verbose >= 0 and (filtered or skipped):
         writer = config.get_terminal_writer()

@@ -60,7 +60,7 @@ Conda users
 
 Or read the `advanced install guide <starter/installation.html>`_
 
-You can find our the list of supported PyTorch versions in our :ref:`compatibility matrix <versioning:Compatibility matrix>`.
+You can find the list of supported PyTorch versions in our :ref:`compatibility matrix <versioning:Compatibility matrix>`.
 
 .. raw:: html
 
@@ -147,10 +147,10 @@ Current Lightning Users
 .. toctree::
    :maxdepth: 1
    :name: start
-   :caption: Get Started
+   :caption: Home
 
    starter/introduction
-   starter/installation
+   Install <starter/installation>
    upgrade/migration_guide
 
 
@@ -181,19 +181,11 @@ Current Lightning Users
 
 .. toctree::
    :maxdepth: 1
-   :name: Examples
-   :caption: Examples
-   :glob:
-
-   notebooks/**/*
-
-
-.. toctree::
-   :maxdepth: 1
    :name: More
    :caption: More
 
    Community <community/index>
+   Examples <tutorials>
    Glossary <glossary/index>
    How to <common/index>
 

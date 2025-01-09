@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 import torch
 from torch import Tensor
 from torch.nn import Module
+from typing_extensions import override
 
 
 class LayerSync(ABC):
@@ -33,12 +34,13 @@ class LayerSync(ABC):
 
 
 class TorchSyncBatchNorm(LayerSync):
-    """A plugin that wraps all batch normalization layers of a model with synchronization logic for
-    multiprocessing.
+    """A plugin that wraps all batch normalization layers of a model with synchronization logic for multiprocessing.
 
     This plugin has no effect in single-device operation.
+
     """
 
+    @override
     def apply(self, model: Module) -> Module:
         """Add global batchnorm for a model spread across multiple GPUs and nodes.
 
@@ -50,9 +52,11 @@ class TorchSyncBatchNorm(LayerSync):
 
         Return:
             LightningModule with batchnorm layers synchronized within the process groups.
+
         """
         return torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
+    @override
     def revert(self, model: Module) -> Module:
         """Convert the wrapped batchnorm layers back to regular batchnorm layers.
 
@@ -61,6 +65,7 @@ class TorchSyncBatchNorm(LayerSync):
 
         Return:
             LightningModule with regular batchnorm layers that will no longer sync across processes.
+
         """
         # Code adapted from https://github.com/pytorch/pytorch/issues/41081#issuecomment-783961547
         # Original author: Kapil Yedidi (@kapily)
@@ -87,6 +92,7 @@ class TorchSyncBatchNorm(LayerSync):
 
 
 class _BatchNormXd(torch.nn.modules.batchnorm._BatchNorm):
+    @override
     def _check_input_dim(self, input: Tensor) -> None:
         # The only difference between BatchNorm1d, BatchNorm2d, BatchNorm3d, etc
         # is this method that is overwritten by the subclass.

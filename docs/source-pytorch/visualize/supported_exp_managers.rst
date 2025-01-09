@@ -8,8 +8,7 @@ To use `Comet.ml <https://www.comet.ml/site/>`_ first install the comet package:
 
 Configure the logger and pass it to the :class:`~lightning.pytorch.trainer.trainer.Trainer`:
 
-.. testcode::
-    :skipif: not _COMET_AVAILABLE
+.. code-block:: python
 
     from lightning.pytorch.loggers import CometLogger
 
@@ -40,8 +39,7 @@ To use `MLflow <https://mlflow.org/>`_ first install the MLflow package:
 
 Configure the logger and pass it to the :class:`~lightning.pytorch.trainer.trainer.Trainer`:
 
-.. testcode::
-    :skipif: not _MLFLOW_AVAILABLE
+.. code-block:: python
 
     from lightning.pytorch.loggers import MLFlowLogger
 
@@ -64,7 +62,7 @@ Here's the full documentation for the :class:`~lightning.pytorch.loggers.MLFlowL
 
 Neptune.ai
 ==========
-To use `Neptune.ai <https://neptune.ai/>`_ first install the neptune package:
+To use `Neptune.ai <https://www.neptune.ai/>`_ first install the neptune package:
 
 .. code-block:: bash
 
@@ -136,7 +134,7 @@ Here's the full documentation for the :class:`~lightning.pytorch.loggers.TensorB
 
 Weights and Biases
 ==================
-To use `Weights and Biases <https://docs.wandb.ai/integrations/lightning/>`_ (wandb) first install the wandb package:
+To use `Weights and Biases <https://docs.wandb.ai/guides/integrations/lightning>`_ (wandb) first install the wandb package:
 
 .. code-block:: bash
 

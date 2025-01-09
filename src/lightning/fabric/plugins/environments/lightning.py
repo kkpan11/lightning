@@ -15,6 +15,8 @@
 import os
 import socket
 
+from typing_extensions import override
+
 from lightning.fabric.plugins.environments.cluster_environment import ClusterEnvironment
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
@@ -32,6 +34,7 @@ class LightningEnvironment(ClusterEnvironment):
     If the main address and port are not provided, the default environment will choose them
     automatically. It is recommended to use this default environment for single-node distributed
     training as it provides a convenient way to launch the training script.
+
     """
 
     def __init__(self) -> None:
@@ -41,48 +44,62 @@ class LightningEnvironment(ClusterEnvironment):
         self._world_size: int = 1
 
     @property
+    @override
     def creates_processes_externally(self) -> bool:
         """Returns whether the cluster creates the processes or not.
 
         If at least :code:`LOCAL_RANK` is available as environment variable, Lightning assumes the user acts as the
         process launcher/job scheduler and Lightning will not launch new processes.
+
         """
         return "LOCAL_RANK" in os.environ
 
     @property
+    @override
     def main_address(self) -> str:
         return os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     @property
+    @override
     def main_port(self) -> int:
         if self._main_port == -1:
-            self._main_port = int(os.environ.get("MASTER_PORT", find_free_network_port()))
+            self._main_port = (
+                int(os.environ["MASTER_PORT"]) if "MASTER_PORT" in os.environ else find_free_network_port()
+            )
         return self._main_port
 
     @staticmethod
+    @override
     def detect() -> bool:
         return True
 
+    @override
     def world_size(self) -> int:
         return self._world_size
 
+    @override
     def set_world_size(self, size: int) -> None:
         self._world_size = size
 
+    @override
     def global_rank(self) -> int:
         return self._global_rank
 
+    @override
     def set_global_rank(self, rank: int) -> None:
         self._global_rank = rank
         rank_zero_only.rank = rank
 
+    @override
     def local_rank(self) -> int:
         return int(os.environ.get("LOCAL_RANK", 0))
 
+    @override
     def node_rank(self) -> int:
         group_rank = os.environ.get("GROUP_RANK", 0)
         return int(os.environ.get("NODE_RANK", group_rank))
 
+    @override
     def teardown(self) -> None:
         if "WORLD_SIZE" in os.environ:
             del os.environ["WORLD_SIZE"]
@@ -93,6 +110,7 @@ def find_free_network_port() -> int:
 
     It is useful in single-node training when we don't want to connect to a real main node but have to set the
     `MASTER_PORT` environment variable.
+
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("", 0))

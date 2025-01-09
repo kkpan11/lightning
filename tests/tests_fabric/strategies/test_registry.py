@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from lightning.fabric.strategies import STRATEGY_REGISTRY
-from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_1_12
 
 
 def test_strategy_registry_with_new_strategy():
@@ -43,8 +42,10 @@ def test_strategy_registry_with_new_strategy():
 def test_available_strategies_in_registry():
     expected = {
         "ddp",
+        "ddp_find_unused_parameters_true",
         "deepspeed",
         "deepspeed_stage_1",
+        "deepspeed_stage_1_offload",
         "deepspeed_stage_2",
         "deepspeed_stage_2_offload",
         "deepspeed_stage_3",
@@ -56,8 +57,9 @@ def test_available_strategies_in_registry():
         "single_tpu",  # legacy
         "single_xla",
         "xla",
+        "xla_fsdp",
         "dp",
+        "fsdp",
+        "fsdp_cpu_offload",
     }
-    if _TORCH_GREATER_EQUAL_1_12:
-        expected |= {"fsdp", "fsdp_cpu_offload"}
     assert set(STRATEGY_REGISTRY.available_strategies()) == expected

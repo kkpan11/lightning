@@ -14,7 +14,9 @@
 """MNIST backbone image classifier example.
 
 To run: python backbone_image_classifier.py --trainer.max_epochs=50
+
 """
+
 from os import path
 from typing import Optional
 
@@ -22,7 +24,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, random_split
 
-from lightning.pytorch import cli_lightning_logo, LightningDataModule, LightningModule
+from lightning.pytorch import LightningDataModule, LightningModule, cli_lightning_logo
 from lightning.pytorch.cli import LightningCLI
 from lightning.pytorch.demos.mnist_datamodule import MNIST
 from lightning.pytorch.utilities.imports import _TORCHVISION_AVAILABLE
@@ -50,8 +52,7 @@ class Backbone(torch.nn.Module):
     def forward(self, x):
         x = x.view(x.size(0), -1)
         x = torch.relu(self.l1(x))
-        x = torch.relu(self.l2(x))
-        return x
+        return torch.relu(self.l2(x))
 
 
 class LitClassifier(LightningModule):
@@ -93,7 +94,7 @@ class LitClassifier(LightningModule):
         self.log("test_loss", loss)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        x, y = batch
+        x, _ = batch
         return self(x)
 
     def configure_optimizers(self):
@@ -106,7 +107,9 @@ class MyDataModule(LightningDataModule):
         super().__init__()
         dataset = MNIST(DATASETS_PATH, train=True, download=True, transform=transforms.ToTensor())
         self.mnist_test = MNIST(DATASETS_PATH, train=False, download=True, transform=transforms.ToTensor())
-        self.mnist_train, self.mnist_val = random_split(dataset, [55000, 5000])
+        self.mnist_train, self.mnist_val = random_split(
+            dataset, [55000, 5000], generator=torch.Generator().manual_seed(42)
+        )
         self.batch_size = batch_size
 
     def train_dataloader(self):

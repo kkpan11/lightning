@@ -25,8 +25,7 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 from torchmetrics.classification import Accuracy
 from torchvision.datasets import MNIST
 
-from lightning.fabric import Fabric  # import Fabric
-from lightning.fabric import seed_everything
+from lightning.fabric import Fabric, seed_everything
 
 DATASETS_PATH = path.join(path.dirname(__file__), "..", "..", "..", "Datasets")
 
@@ -69,13 +68,8 @@ def train_dataloader(model, data_loader, optimizer, fabric, epoch, hparams, fold
         optimizer.step()
         if (batch_idx == 0) or ((batch_idx + 1) % hparams.log_interval == 0):
             print(
-                "Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}".format(
-                    epoch,
-                    batch_idx * len(data),
-                    len(data_loader.dataset),
-                    100.0 * batch_idx / len(data_loader),
-                    loss.item(),
-                )
+                f"Train Epoch: {epoch} [{batch_idx * len(data)}/{len(data_loader.dataset)}"
+                f" ({100.0 * batch_idx / len(data_loader):.0f}%)]\tLoss: {loss.item():.6f}"
             )
 
         if hparams.dry_run:
@@ -97,7 +91,7 @@ def validate_dataloader(model, data_loader, fabric, hparams, fold, acc_metric):
             if hparams.dry_run:
                 break
 
-    # all_gather is used to aggregated the value across processes
+    # all_gather is used to aggregate the value across processes
     loss = fabric.all_gather(loss).sum() / len(data_loader.dataset)
 
     # compute acc
@@ -109,7 +103,7 @@ def validate_dataloader(model, data_loader, fabric, hparams, fold, acc_metric):
 
 def run(hparams):
     # Create the Lightning Fabric object. The parameters like accelerator, strategy, devices etc. will be proided
-    # by the command line. See all options: `lightning run model --help`
+    # by the command line. See all options: `fabric run --help`
     fabric = Fabric()
 
     seed_everything(hparams.seed)  # instead of torch.manual_seed(...)
@@ -117,8 +111,8 @@ def run(hparams):
     transform = T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
 
     # Let rank 0 download the data first, then everyone will load MNIST
-    with fabric.rank_zero_first():
-        dataset = MNIST(DATASETS_PATH, train=True, transform=transform)
+    with fabric.rank_zero_first(local=False):  # set `local=True` if your filesystem is not shared between machines
+        dataset = MNIST(DATASETS_PATH, train=True, download=True, transform=transform)
 
     # Loop over different folds (shuffle = False by default so reproducible)
     folds = hparams.folds
@@ -147,6 +141,9 @@ def run(hparams):
             train_loader = DataLoader(dataset, batch_size=batch_size, sampler=SubsetRandomSampler(train_ids))
             val_loader = DataLoader(dataset, batch_size=batch_size, sampler=SubsetRandomSampler(val_ids))
 
+            # set up dataloaders to move data to the correct device
+            train_loader, val_loader = fabric.setup_dataloaders(train_loader, val_loader)
+
             # get model and optimizer for the current fold
             model, optimizer = models[fold], optimizers[fold]
 
@@ -170,7 +167,7 @@ def run(hparams):
 if __name__ == "__main__":
     # Arguments can be passed in through the CLI as normal and will be parsed here
     # Example:
-    # lightning run model image_classifier.py accelerator=cuda --epochs=3
+    # fabric run image_classifier.py accelerator=cuda --epochs=3
     parser = argparse.ArgumentParser(description="Fabric MNIST K-Fold Cross Validation Example")
     parser.add_argument(
         "--batch-size", type=int, default=64, metavar="N", help="input batch size for training (default: 64)"

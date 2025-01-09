@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable
 
 import torch
 from torch import Tensor
@@ -52,14 +52,15 @@ class ServableModule(ABC, torch.nn.Module):
         )
         trainer.fit(ServableBoringModel())
         assert serve_cb.resp.json() == {"output": [0, 1]}
+
     """
 
     @abstractmethod
-    def configure_payload(self) -> Dict[str, Any]:
+    def configure_payload(self) -> dict[str, Any]:
         """Returns a request payload as a dictionary."""
 
     @abstractmethod
-    def configure_serialization(self) -> Tuple[Dict[str, Callable], Dict[str, Callable]]:
+    def configure_serialization(self) -> tuple[dict[str, Callable], dict[str, Callable]]:
         """Returns a tuple of dictionaries.
 
         The first dictionary contains the name of the ``serve_step`` input variables name as its keys
@@ -67,10 +68,11 @@ class ServableModule(ABC, torch.nn.Module):
 
         The second dictionary contains the name of the ``serve_step`` output variables name as its keys
         and the associated serialization function (e.g function to convert a tensors into payload).
+
         """
 
     @abstractmethod
-    def serve_step(self, *args: Tensor, **kwargs: Tensor) -> Dict[str, Tensor]:
+    def serve_step(self, *args: Tensor, **kwargs: Tensor) -> dict[str, Tensor]:
         r"""Returns the predictions of your model as a dictionary.
 
         .. code-block:: python
@@ -84,8 +86,9 @@ class ServableModule(ABC, torch.nn.Module):
 
         Return:
             - ``dict`` - A dictionary with their associated tensors.
+
         """
 
     @abstractmethod
-    def configure_response(self) -> Dict[str, Any]:
+    def configure_response(self) -> dict[str, Any]:
         """Returns a response to validate the server response."""

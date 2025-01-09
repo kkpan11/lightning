@@ -22,7 +22,7 @@ from argparse import Namespace
 from copy import deepcopy
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, IO, Optional, Type, Union
+from typing import IO, TYPE_CHECKING, Any, Callable, Optional, Union
 from warnings import warn
 
 import torch
@@ -30,34 +30,35 @@ import yaml
 from lightning_utilities.core.apply_func import apply_to_collection
 
 import lightning.pytorch as pl
+from lightning.fabric.utilities.cloud_io import _is_dir, get_filesystem
 from lightning.fabric.utilities.cloud_io import _load as pl_load
-from lightning.fabric.utilities.cloud_io import get_filesystem
+from lightning.fabric.utilities.data import AttributeDict
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
-from lightning.pytorch.utilities import _OMEGACONF_AVAILABLE
+from lightning.pytorch.accelerators import CUDAAccelerator, MPSAccelerator, XLAAccelerator
+from lightning.pytorch.utilities.imports import _OMEGACONF_AVAILABLE
 from lightning.pytorch.utilities.migration import pl_legacy_patch
 from lightning.pytorch.utilities.migration.utils import _pl_migrate_checkpoint
-from lightning.pytorch.utilities.parsing import AttributeDict, parse_class_init_keys
+from lightning.pytorch.utilities.model_helpers import is_overridden
+from lightning.pytorch.utilities.parsing import parse_class_init_keys
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
+if TYPE_CHECKING:
+    from torch.storage import UntypedStorage
+
 log = logging.getLogger(__name__)
-
-if _OMEGACONF_AVAILABLE:
-    from omegaconf import OmegaConf
-    from omegaconf.dictconfig import DictConfig
-    from omegaconf.errors import UnsupportedValueType, ValidationError
-
 # the older shall be on the top
 CHECKPOINT_PAST_HPARAMS_KEYS = ("hparams", "module_arguments")  # used in 0.7.6
 
 
 def _load_from_checkpoint(
-    cls: Union[Type["pl.LightningModule"], Type["pl.LightningDataModule"]],
+    cls: Union[type["pl.LightningModule"], type["pl.LightningDataModule"]],
     checkpoint_path: Union[_PATH, IO],
     map_location: _MAP_LOCATION_TYPE = None,
     hparams_file: Optional[_PATH] = None,
     strict: Optional[bool] = None,
     **kwargs: Any,
 ) -> Union["pl.LightningModule", "pl.LightningDataModule"]:
+    map_location = map_location or _default_map_location
     with pl_legacy_patch():
         checkpoint = pl_load(checkpoint_path, map_location=map_location)
 
@@ -90,7 +91,8 @@ def _load_from_checkpoint(
         model = _load_state(cls, checkpoint, strict=strict, **kwargs)
         state_dict = checkpoint["state_dict"]
         if not state_dict:
-            raise ValueError(f"The state dict in {checkpoint_path!r} contains no parameters.")
+            rank_zero_warn(f"The state dict in {checkpoint_path!r} contains no parameters.")
+            return model
 
         device = next((t for t in state_dict.values() if isinstance(t, torch.Tensor)), torch.tensor(0)).device
         assert isinstance(model, pl.LightningModule)
@@ -99,9 +101,22 @@ def _load_from_checkpoint(
     raise NotImplementedError(f"Unsupported {cls}")
 
 
+def _default_map_location(storage: "UntypedStorage", location: str) -> Optional["UntypedStorage"]:
+    if (
+        location.startswith("mps")
+        and not MPSAccelerator.is_available()
+        or location.startswith("cuda")
+        and not CUDAAccelerator.is_available()
+        or location.startswith("xla")
+        and not XLAAccelerator.is_available()
+    ):
+        return storage.cpu()
+    return None  # default behavior by `torch.load()`
+
+
 def _load_state(
-    cls: Union[Type["pl.LightningModule"], Type["pl.LightningDataModule"]],
-    checkpoint: Dict[str, Any],
+    cls: Union[type["pl.LightningModule"], type["pl.LightningDataModule"]],
+    checkpoint: dict[str, Any],
     strict: Optional[bool] = None,
     **cls_kwargs_new: Any,
 ) -> Union["pl.LightningModule", "pl.LightningDataModule"]:
@@ -136,23 +151,39 @@ def _load_state(
     _cls_kwargs.update(cls_kwargs_loaded)
     _cls_kwargs.update(cls_kwargs_new)
 
+    instantiator = None
+    instantiator_path = _cls_kwargs.pop("_instantiator", None)
+    if instantiator_path is not None:
+        # import custom instantiator
+        module_path, name = instantiator_path.rsplit(".", 1)
+        instantiator = getattr(__import__(module_path, fromlist=[name]), name)
+
     if not cls_spec.varkw:
         # filter kwargs according to class init unless it allows any argument via kwargs
         _cls_kwargs = {k: v for k, v in _cls_kwargs.items() if k in cls_init_args_name}
 
-    obj = cls(**_cls_kwargs)
-
-    if isinstance(obj, pl.LightningModule):
-        # give model a chance to load something
-        obj.on_load_checkpoint(checkpoint)
+    obj = instantiator(cls, _cls_kwargs) if instantiator else cls(**_cls_kwargs)
 
     if isinstance(obj, pl.LightningDataModule):
         if obj.__class__.__qualname__ in checkpoint:
             obj.load_state_dict(checkpoint[obj.__class__.__qualname__])
         return obj
 
+    if isinstance(obj, pl.LightningModule):
+        if obj._strict_loading is not None and strict is not None and strict != obj.strict_loading:
+            raise ValueError(
+                f"You set `.load_from_checkpoint(..., strict={strict!r})` which is in conflict with"
+                f" `{cls.__name__}.strict_loading={obj.strict_loading!r}. Please set the same value for both of them."
+            )
+        strict = obj.strict_loading if strict is None else strict
+
+        if is_overridden("configure_model", obj):
+            obj.configure_model()
+
+        # give model a chance to load something
+        obj.on_load_checkpoint(checkpoint)
+
     # load the state_dict on the model automatically
-    assert strict is not None
     keys = obj.load_state_dict(checkpoint["state_dict"], strict=strict)
 
     if not strict:
@@ -169,8 +200,8 @@ def _load_state(
 
 
 def _convert_loaded_hparams(
-    model_args: Dict[str, Any], hparams_type: Optional[Union[Callable, str]] = None
-) -> Dict[str, Any]:
+    model_args: dict[str, Any], hparams_type: Optional[Union[Callable, str]] = None
+) -> dict[str, Any]:
     """Convert hparams according given type in callable or string (past) format."""
     # if not hparams type define
     if not hparams_type:
@@ -196,6 +227,7 @@ def update_hparams(hparams: dict, updates: dict) -> None:
     Args:
         hparams: the original params and also target object
         updates: new params to be used as update
+
     """
     for k, v in updates.items():
         # if missing, add the key
@@ -211,7 +243,7 @@ def update_hparams(hparams: dict, updates: dict) -> None:
             hparams.update({k: v})
 
 
-def load_hparams_from_tags_csv(tags_csv: _PATH) -> Dict[str, Any]:
+def load_hparams_from_tags_csv(tags_csv: _PATH) -> dict[str, Any]:
     """Load hparams from a file.
 
     >>> hparams = Namespace(batch_size=32, learning_rate=0.001, data_root='./any/path/here')
@@ -221,6 +253,7 @@ def load_hparams_from_tags_csv(tags_csv: _PATH) -> Dict[str, Any]:
     >>> vars(hparams) == hparams_new
     True
     >>> os.remove(path_csv)
+
     """
     fs = get_filesystem(tags_csv)
     if not fs.exists(tags_csv):
@@ -234,7 +267,7 @@ def load_hparams_from_tags_csv(tags_csv: _PATH) -> Dict[str, Any]:
 
 def save_hparams_to_tags_csv(tags_csv: _PATH, hparams: Union[dict, Namespace]) -> None:
     fs = get_filesystem(tags_csv)
-    if not fs.isdir(os.path.dirname(tags_csv)):
+    if not _is_dir(fs, os.path.dirname(tags_csv)):
         raise RuntimeError(f"Missing folder: {os.path.dirname(tags_csv)}.")
 
     if isinstance(hparams, Namespace):
@@ -248,7 +281,7 @@ def save_hparams_to_tags_csv(tags_csv: _PATH, hparams: Union[dict, Namespace]) -
             writer.writerow({"key": k, "value": v})
 
 
-def load_hparams_from_yaml(config_yaml: _PATH, use_omegaconf: bool = True) -> Dict[str, Any]:
+def load_hparams_from_yaml(config_yaml: _PATH, use_omegaconf: bool = True) -> dict[str, Any]:
     """Load hparams from a file.
 
         Args:
@@ -263,6 +296,7 @@ def load_hparams_from_yaml(config_yaml: _PATH, use_omegaconf: bool = True) -> Di
     >>> vars(hparams) == hparams_new
     True
     >>> os.remove(path_yaml)
+
     """
     fs = get_filesystem(config_yaml)
     if not fs.exists(config_yaml):
@@ -273,6 +307,9 @@ def load_hparams_from_yaml(config_yaml: _PATH, use_omegaconf: bool = True) -> Di
         hparams = yaml.full_load(fp)
 
     if _OMEGACONF_AVAILABLE and use_omegaconf:
+        from omegaconf import OmegaConf
+        from omegaconf.errors import UnsupportedValueType, ValidationError
+
         with contextlib.suppress(UnsupportedValueType, ValidationError):
             return OmegaConf.create(hparams)
     return hparams
@@ -288,7 +325,7 @@ def save_hparams_to_yaml(config_yaml: _PATH, hparams: Union[dict, Namespace], us
 
     """
     fs = get_filesystem(config_yaml)
-    if not fs.isdir(os.path.dirname(config_yaml)):
+    if not _is_dir(fs, os.path.dirname(config_yaml)):
         raise RuntimeError(f"Missing folder: {os.path.dirname(config_yaml)}.")
 
     # convert Namespace or AD to dict
@@ -299,6 +336,10 @@ def save_hparams_to_yaml(config_yaml: _PATH, hparams: Union[dict, Namespace], us
 
     # saving with OmegaConf objects
     if _OMEGACONF_AVAILABLE and use_omegaconf:
+        from omegaconf import OmegaConf
+        from omegaconf.dictconfig import DictConfig
+        from omegaconf.errors import UnsupportedValueType, ValidationError
+
         # deepcopy: hparams from user shouldn't be resolved
         hparams = deepcopy(hparams)
         hparams = apply_to_collection(hparams, DictConfig, OmegaConf.to_container, resolve=True)
@@ -318,7 +359,7 @@ def save_hparams_to_yaml(config_yaml: _PATH, hparams: Union[dict, Namespace], us
         try:
             v = v.name if isinstance(v, Enum) else v
             yaml.dump(v)
-        except TypeError:
+        except (TypeError, ValueError):
             warn(f"Skipping '{k}' parameter because it is not possible to safely dump to YAML.")
             hparams[k] = type(v).__name__
         else:

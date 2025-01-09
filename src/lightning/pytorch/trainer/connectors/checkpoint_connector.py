@@ -14,7 +14,7 @@
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 from fsspec.core import url_to_fs
@@ -23,23 +23,19 @@ from torch import Tensor
 
 import lightning.pytorch as pl
 from lightning.fabric.plugins.environments.slurm import SLURMEnvironment
-from lightning.fabric.utilities.cloud_io import get_filesystem
+from lightning.fabric.utilities.cloud_io import _is_dir, get_filesystem
 from lightning.fabric.utilities.types import _PATH
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.plugins.precision import MixedPrecisionPlugin
+from lightning.pytorch.plugins.precision import MixedPrecision
 from lightning.pytorch.trainer import call
 from lightning.pytorch.trainer.states import TrainerFn
-from lightning.pytorch.utilities import _OMEGACONF_AVAILABLE
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
+from lightning.pytorch.utilities.imports import _OMEGACONF_AVAILABLE
 from lightning.pytorch.utilities.migration import pl_legacy_patch
 from lightning.pytorch.utilities.migration.utils import _pl_migrate_checkpoint
 from lightning.pytorch.utilities.rank_zero import rank_zero_info, rank_zero_warn
 
-if _OMEGACONF_AVAILABLE:
-    from omegaconf import Container
-
-
-log: logging.Logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 class _CheckpointConnector:
@@ -48,14 +44,14 @@ class _CheckpointConnector:
         self._ckpt_path: Optional[_PATH] = None
         # flag to know if the user is changing the checkpoint path statefully. See `trainer.ckpt_path.setter`
         self._user_managed: bool = False
-        self._loaded_checkpoint: Dict[str, Any] = {}
+        self._loaded_checkpoint: dict[str, Any] = {}
 
     @property
     def _hpc_resume_path(self) -> Optional[str]:
         dir_path_hpc = self.trainer.default_root_dir
         dir_path_hpc = str(dir_path_hpc)
         fs, path = url_to_fs(dir_path_hpc)
-        if not fs.isdir(path):
+        if not _is_dir(fs, path):
             return None
         max_version = self.__max_ckpt_version_in_folder(dir_path_hpc, "hpc_ckpt_")
         if max_version is not None:
@@ -71,6 +67,7 @@ class _CheckpointConnector:
         2. from fault-tolerant auto-saved checkpoint if found
         3. from `checkpoint_path` file if provided
         4. don't restore
+
         """
         self._ckpt_path = checkpoint_path
         if not checkpoint_path:
@@ -188,7 +185,7 @@ class _CheckpointConnector:
                 # not an error so it can be set and forget before the first `fit` run
                 rank_zero_warn(
                     f'.{fn}(ckpt_path="last") is set, but there is no last checkpoint available.'
-                    " No checkpoint will be loaded."
+                    " No checkpoint will be loaded. HINT: Set `ModelCheckpoint(..., save_last=True)`."
                 )
                 return None
             ckpt_path = max(candidates_ts, key=candidates_ts.get)  # type: ignore[arg-type]
@@ -209,8 +206,7 @@ class _CheckpointConnector:
         return ckpt_path
 
     def resume_end(self) -> None:
-        """Signal the connector that all states have resumed and memory for the checkpoint object can be
-        released."""
+        """Signal the connector that all states have resumed and memory for the checkpoint object can be released."""
         assert self.trainer.state.fn is not None
         if self._ckpt_path:
             message = "Restored all states" if self.trainer.state.fn == TrainerFn.FITTING else "Loaded model weights"
@@ -235,6 +231,7 @@ class _CheckpointConnector:
 
         Args:
             checkpoint_path: Path to a PyTorch Lightning checkpoint file.
+
         """
         self.resume_start(checkpoint_path)
 
@@ -266,21 +263,25 @@ class _CheckpointConnector:
 
         Hooks are called first to give the LightningModule a chance to modify the contents, then finally the model gets
         updated with the loaded weights.
+
         """
         if not self._loaded_checkpoint:
             return
 
-        trainer = self.trainer
         # hook: give user access to checkpoint if needed.
-        call._call_lightning_module_hook(trainer, "on_load_checkpoint", self._loaded_checkpoint)
+        call._call_lightning_module_hook(self.trainer, "on_load_checkpoint", self._loaded_checkpoint)
 
         # restore model state_dict
-        trainer.strategy.load_model_state_dict(self._loaded_checkpoint)
+        self.trainer.strategy.load_model_state_dict(
+            self._loaded_checkpoint,
+            strict=self.trainer.lightning_module.strict_loading,
+        )
 
     def restore_training_state(self) -> None:
         """Restore the trainer state from the pre-loaded checkpoint.
 
         This includes the precision settings, loop progress, optimizer states and learning rate scheduler states.
+
         """
         if not self._loaded_checkpoint:
             return
@@ -304,7 +305,7 @@ class _CheckpointConnector:
             prec_plugin.load_state_dict(self._loaded_checkpoint[prec_plugin.__class__.__qualname__])
 
         # old checkpoints compatibility
-        if "native_amp_scaling_state" in self._loaded_checkpoint and isinstance(prec_plugin, MixedPrecisionPlugin):
+        if "native_amp_scaling_state" in self._loaded_checkpoint and isinstance(prec_plugin, MixedPrecision):
             prec_plugin.load_state_dict(self._loaded_checkpoint["native_amp_scaling_state"])
 
     def restore_callbacks(self) -> None:
@@ -320,6 +321,7 @@ class _CheckpointConnector:
         """Restores the loop progress from the pre-loaded checkpoint.
 
         Calls hooks on the loops to give it a chance to restore its state from the checkpoint.
+
         """
         if not self._loaded_checkpoint:
             return
@@ -395,9 +397,7 @@ class _CheckpointConnector:
         self.resume_start(checkpoint_path)
         self.restore_model()
         self.restore_datamodule()
-        if self.trainer.state.fn == TrainerFn.FITTING:
-            # restore callback states
-            self.restore_callbacks()
+        self.restore_callbacks()
 
     def dump_checkpoint(self, weights_only: bool = False) -> dict:
         """Creating a model checkpoint dictionary object from various component states.
@@ -420,6 +420,7 @@ class _CheckpointConnector:
                 something_cool_i_want_to_save: anything you define through model.on_save_checkpoint
                 LightningDataModule.__class__.__qualname__: pl DataModule's state
             }
+
         """
         trainer = self.trainer
         model = trainer.lightning_module
@@ -459,6 +460,9 @@ class _CheckpointConnector:
                 checkpoint[prec_plugin.__class__.__qualname__] = prec_plugin_state_dict
             prec_plugin.on_save_checkpoint(checkpoint)
 
+        if _OMEGACONF_AVAILABLE:
+            from omegaconf import Container
+
         # dump hyper-parameters
         for obj in (model, datamodule):
             if obj and obj.hparams:
@@ -487,10 +491,10 @@ class _CheckpointConnector:
         call._call_lightning_module_hook(trainer, "on_save_checkpoint", checkpoint)
         return checkpoint
 
-    def _get_lightning_module_state_dict(self) -> Dict[str, Tensor]:
+    def _get_lightning_module_state_dict(self) -> dict[str, Tensor]:
         return self.trainer.strategy.lightning_module_state_dict()
 
-    def _get_loops_state_dict(self) -> Dict[str, Any]:
+    def _get_loops_state_dict(self) -> dict[str, Any]:
         return {
             "fit_loop": self.trainer.fit_loop.state_dict(),
             "validate_loop": self.trainer.validate_loop.state_dict(),
@@ -507,6 +511,7 @@ class _CheckpointConnector:
             name_key: file name prefix
         Returns:
             None if no-corresponding-file else maximum suffix number
+
         """
         # check directory existence
         fs, uri = url_to_fs(str(dir_path))

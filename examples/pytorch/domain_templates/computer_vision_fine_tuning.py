@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Computer vision example on Transfer Learning. This computer vision example illustrates how one could fine-tune a
-pre-trained network (by default, a ResNet50 is used) using pytorch-lightning. For the sake of this example, the
-'cats and dogs dataset' (~60MB, see `DATA_URL` below) and the proposed network (denoted by `TransferLearningModel`,
-see below) is trained for 15 epochs.
+pre-trained network (by default, a ResNet50 is used) using pytorch-lightning. For the sake of this example, the 'cats
+and dogs dataset' (~60MB, see `DATA_URL` below) and the proposed network (denoted by `TransferLearningModel`, see
+below) is trained for 15 epochs.
 
 The training consists of three stages.
 
@@ -37,6 +37,7 @@ Note:
 
 To run:
     python computer_vision_fine_tuning.py fit
+
 """
 
 import logging
@@ -54,7 +55,7 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.utils import download_and_extract_archive
 
-from lightning.pytorch import cli_lightning_logo, LightningDataModule, LightningModule
+from lightning.pytorch import LightningDataModule, LightningModule, cli_lightning_logo
 from lightning.pytorch.callbacks.finetuning import BaseFinetuning
 from lightning.pytorch.cli import LightningCLI
 from lightning.pytorch.utilities import rank_zero_info
@@ -97,6 +98,7 @@ class CatDogImageDataModule(LightningDataModule):
             dl_path: root directory where to download the data
             num_workers: number of CPU workers
             batch_size: number of sample in a batch
+
         """
         super().__init__()
 
@@ -118,14 +120,12 @@ class CatDogImageDataModule(LightningDataModule):
 
     @property
     def train_transform(self):
-        return transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                self.normalize_transform,
-            ]
-        )
+        return transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            self.normalize_transform,
+        ])
 
     @property
     def valid_transform(self):
@@ -174,6 +174,7 @@ class TransferLearningModel(LightningModule):
             milestones: List of two epochs milestones
             lr: Initial learning rate
             lr_scheduler_gamma: Factor by which the learning rate is reduced at each milestone
+
         """
         super().__init__()
         self.backbone = backbone
@@ -209,15 +210,14 @@ class TransferLearningModel(LightningModule):
         """Forward pass.
 
         Returns logits.
+
         """
         # 1. Feature extraction:
         x = self.feature_extractor(x)
         x = x.squeeze(-1).squeeze(-1)
 
         # 2. Classifier (returns logits):
-        x = self.fc(x)
-
-        return x
+        return self.fc(x)
 
     def loss(self, logits, labels):
         return self.loss_func(input=logits, target=labels)
@@ -268,13 +268,11 @@ class MyLightningCLI(LightningCLI):
         parser.link_arguments("data.batch_size", "model.batch_size")
         parser.link_arguments("finetuning.milestones", "model.milestones")
         parser.link_arguments("finetuning.train_bn", "model.train_bn")
-        parser.set_defaults(
-            {
-                "trainer.max_epochs": 15,
-                "trainer.enable_model_summary": False,
-                "trainer.num_sanity_val_steps": 0,
-            }
-        )
+        parser.set_defaults({
+            "trainer.max_epochs": 15,
+            "trainer.enable_model_summary": False,
+            "trainer.num_sanity_val_steps": 0,
+        })
 
 
 def cli_main():

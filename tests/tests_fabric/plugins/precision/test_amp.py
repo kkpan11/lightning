@@ -18,11 +18,13 @@ import pytest
 import torch
 
 from lightning.fabric.plugins.precision.amp import MixedPrecision
+from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_2_4
 
 
 def test_amp_precision_default_scaler():
     precision = MixedPrecision(precision="16-mixed", device=Mock())
-    assert isinstance(precision.scaler, torch.cuda.amp.GradScaler)
+    scaler_cls = torch.amp.GradScaler if _TORCH_GREATER_EQUAL_2_4 else torch.cuda.amp.GradScaler
+    assert isinstance(precision.scaler, scaler_cls)
 
 
 def test_amp_precision_scaler_with_bf16():
@@ -37,23 +39,21 @@ def test_amp_precision_forward_context():
     """Test to ensure that the context manager correctly is set to bfloat16 on CPU and CUDA."""
     precision = MixedPrecision(precision="16-mixed", device="cuda")
     assert precision.device == "cuda"
-    assert isinstance(precision.scaler, torch.cuda.amp.GradScaler)
+    scaler_cls = torch.amp.GradScaler if _TORCH_GREATER_EQUAL_2_4 else torch.cuda.amp.GradScaler
+    assert isinstance(precision.scaler, scaler_cls)
     assert torch.get_default_dtype() == torch.float32
     with precision.forward_context():
-        # check with str due to a bug upstream: https://github.com/pytorch/pytorch/issues/65786
-        assert str(torch.get_autocast_gpu_dtype()) in ("torch.float16", "torch.half")
+        assert torch.get_autocast_gpu_dtype() == torch.float16
 
     precision = MixedPrecision(precision="bf16-mixed", device="cpu")
     assert precision.device == "cpu"
     assert precision.scaler is None
     with precision.forward_context():
-        # check with str due to a bug upstream: https://github.com/pytorch/pytorch/issues/65786
-        assert str(torch.get_autocast_cpu_dtype()) == str(torch.bfloat16)
+        assert torch.get_autocast_cpu_dtype() == torch.bfloat16
 
-    context_manager = precision._autocast_context_manager()
+    context_manager = precision.forward_context()
     assert isinstance(context_manager, torch.autocast)
-    # check with str due to a bug upstream: https://github.com/pytorch/pytorch/issues/65786
-    assert str(context_manager.fast_dtype) == str(torch.bfloat16)
+    assert context_manager.fast_dtype == torch.bfloat16
 
 
 def test_amp_precision_backward():

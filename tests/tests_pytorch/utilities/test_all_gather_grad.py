@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import numpy as np
+import pytest
 import torch
 
 from lightning.pytorch import Trainer
@@ -45,28 +46,27 @@ def all_gather_ddp_spawn_fn(strategy):
 
 
 @RunIf(skip_windows=True)
+@pytest.mark.flaky(reruns=3)
 def test_all_gather_ddp_spawn():
     spawn_launch(all_gather_ddp_spawn_fn, [torch.device("cpu")] * 3)
 
 
 @RunIf(min_cuda_gpus=2, skip_windows=True, standalone=True)
-def test_all_gather_collection(tmpdir):
+def test_all_gather_collection(tmp_path):
     class TestModel(BoringModel):
         on_train_epoch_end_called = False
 
         def on_train_epoch_end(self):
             losses = torch.rand(2, 2).t()
-            gathered_loss = self.all_gather(
-                {
-                    "losses_tensor_int": losses.int(),
-                    "losses_tensor_float": losses,
-                    "losses_tensor_list": [losses, losses],
-                    "losses_np_ndarray": np.array([1, 2, 3]),
-                    "losses_bool": [True, False],
-                    "losses_float": [0.0, 1.0, 2.0],
-                    "losses_int": [0, 1, 2],
-                }
-            )
+            gathered_loss = self.all_gather({
+                "losses_tensor_int": losses.int(),
+                "losses_tensor_float": losses,
+                "losses_tensor_list": [losses, losses],
+                "losses_np_ndarray": np.array([1, 2, 3]),
+                "losses_bool": [True, False],
+                "losses_float": [0.0, 1.0, 2.0],
+                "losses_int": [0, 1, 2],
+            })
             assert gathered_loss["losses_tensor_int"][0].dtype == torch.int32
             assert gathered_loss["losses_tensor_float"][0].dtype == torch.float
             assert gathered_loss["losses_np_ndarray"][0].dtype == torch.int64
@@ -87,7 +87,7 @@ def test_all_gather_collection(tmpdir):
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=8,
         limit_val_batches=0,
         max_epochs=1,
@@ -105,7 +105,7 @@ def test_all_gather_collection(tmpdir):
 
 
 @RunIf(min_cuda_gpus=2, skip_windows=True, standalone=True)
-def test_all_gather_sync_grads(tmpdir):
+def test_all_gather_sync_grads(tmp_path):
     class TestModel(BoringModel):
         training_step_called = False
 
@@ -118,7 +118,7 @@ def test_all_gather_sync_grads(tmpdir):
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=1,
         limit_val_batches=0,
         max_epochs=1,

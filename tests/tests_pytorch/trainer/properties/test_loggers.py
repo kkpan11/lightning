@@ -48,7 +48,7 @@ def test_trainer_loggers_setters():
     logger2 = CustomLogger()
 
     trainer = Trainer()
-    assert type(trainer.logger) == TensorBoardLogger
+    assert type(trainer.logger) is TensorBoardLogger
     assert trainer.loggers == [trainer.logger]
 
     # Test setters for trainer.logger
@@ -84,13 +84,13 @@ def test_trainer_loggers_setters():
         [],
     ],
 )
-def test_no_logger(tmpdir, logger_value):
+def test_no_logger(tmp_path, logger_value):
     """Test the cases where logger=None, logger=False, logger=[] are passed to Trainer."""
     trainer = Trainer(
         logger=logger_value,
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         max_steps=1,
     )
     assert trainer.logger is None
     assert trainer.loggers == []
-    assert trainer.log_dir == tmpdir
+    assert trainer.log_dir == str(tmp_path)

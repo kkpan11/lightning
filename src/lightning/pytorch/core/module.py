@@ -12,37 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """The LightningModule - an nn.Module with many additional features."""
+
 import logging
 import numbers
-import operator
 import weakref
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from typing import (
+    IO,
+    TYPE_CHECKING,
     Any,
     Callable,
-    cast,
-    Dict,
-    Generator,
-    IO,
-    List,
     Literal,
-    Mapping,
     Optional,
-    overload,
-    Sequence,
-    Tuple,
     Union,
+    cast,
+    overload,
 )
 
 import torch
 from lightning_utilities.core.apply_func import apply_to_collection
-from lightning_utilities.core.imports import compare_version, RequirementCache
+from lightning_utilities.core.imports import RequirementCache
 from torch import ScriptModule, Tensor
 from torch.nn import Module
 from torch.optim.optimizer import Optimizer
 from torchmetrics import Metric, MetricCollection
-from typing_extensions import Self
+from typing_extensions import Self, override
 
 import lightning.fabric as lf
 import lightning.pytorch as pl
@@ -50,7 +47,6 @@ from lightning.fabric.loggers import Logger as FabricLogger
 from lightning.fabric.utilities.apply_func import convert_to_tensors
 from lightning.fabric.utilities.cloud_io import get_filesystem
 from lightning.fabric.utilities.device_dtype_mixin import _DeviceDtypeModuleMixin
-from lightning.fabric.utilities.imports import _IS_WINDOWS, _TORCH_GREATER_EQUAL_2_0, _TORCH_GREATER_EQUAL_2_1
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.fabric.wrappers import _FabricOptimizer
 from lightning.pytorch.callbacks.callback import Callback
@@ -61,12 +57,23 @@ from lightning.pytorch.core.saving import _load_from_checkpoint
 from lightning.pytorch.loggers import Logger
 from lightning.pytorch.trainer import call
 from lightning.pytorch.trainer.connectors.logger_connector.fx_validator import _FxValidator
+from lightning.pytorch.trainer.connectors.logger_connector.result import _get_default_dtype
 from lightning.pytorch.utilities import GradClipAlgorithmType
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from lightning.pytorch.utilities.imports import _TORCHMETRICS_GREATER_EQUAL_0_9_1
-from lightning.pytorch.utilities.rank_zero import rank_zero_debug, rank_zero_warn, WarningCache
+from lightning.pytorch.utilities.model_helpers import _restricted_classmethod
+from lightning.pytorch.utilities.rank_zero import WarningCache, rank_zero_warn
 from lightning.pytorch.utilities.signature_utils import is_param_in_hook_signature
-from lightning.pytorch.utilities.types import _METRIC, LRSchedulerPLType, LRSchedulerTypeUnion, STEP_OUTPUT
+from lightning.pytorch.utilities.types import (
+    _METRIC,
+    STEP_OUTPUT,
+    LRSchedulerPLType,
+    LRSchedulerTypeUnion,
+    OptimizerLRScheduler,
+)
+
+if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
 
 _ONNX_AVAILABLE = RequirementCache("onnx")
 
@@ -74,7 +81,7 @@ warning_cache = WarningCache()
 log = logging.getLogger(__name__)
 
 MODULE_OPTIMIZERS = Union[
-    Optimizer, LightningOptimizer, _FabricOptimizer, List[Optimizer], List[LightningOptimizer], List[_FabricOptimizer]
+    Optimizer, LightningOptimizer, _FabricOptimizer, list[Optimizer], list[LightningOptimizer], list[_FabricOptimizer]
 ]
 
 
@@ -88,7 +95,7 @@ class LightningModule(
 ):
     # Below is for property support of JIT
     # since none of these are important when using JIT, we are going to ignore them.
-    __jit_unused_properties__: List[str] = (
+    __jit_unused_properties__: list[str] = (
         [
             "example_input_array",
             "on_gpu",
@@ -101,6 +108,8 @@ class LightningModule(
             "automatic_optimization",
             "trainer",
             "fabric",
+            "strict_loading",
+            "device_mesh",
         ]
         + _DeviceDtypeModuleMixin.__jit_unused_properties__
         + HyperparametersMixin.__jit_unused_properties__
@@ -115,43 +124,49 @@ class LightningModule(
         super().__init__(*args, **kwargs)
 
         # pointer to the trainer object
-        self._trainer: Optional["pl.Trainer"] = None
+        self._trainer: Optional[pl.Trainer] = None
 
-        # optionally can be set by user
-        self._example_input_array: Optional[Union[Tensor, Tuple, Dict]] = None
-        self._current_fx_name: Optional[str] = None
+        # attributes that can be set by user
+        self._example_input_array: Optional[Union[Tensor, tuple, dict]] = None
         self._automatic_optimization: bool = True
-        self._param_requires_grad_state: Dict[str, bool] = {}
-        self._metric_attributes: Optional[Dict[int, str]] = None
-        self._register_sharded_tensor_state_dict_hooks_if_available()
-        self._compiler_ctx: Optional[Dict[str, Any]] = None
+        self._strict_loading: Optional[bool] = None
+
+        # attributes used internally
+        self._current_fx_name: Optional[str] = None
+        self._param_requires_grad_state: dict[str, bool] = {}
+        self._metric_attributes: Optional[dict[int, str]] = None
+        self._compiler_ctx: Optional[dict[str, Any]] = None
 
         # attributes only used when using fabric
-        self._fabric: Optional["lf.Fabric"] = None
-        self._fabric_optimizers: List[_FabricOptimizer] = []
+        self._fabric: Optional[lf.Fabric] = None
+        self._fabric_optimizers: list[_FabricOptimizer] = []
+
+        # access to device mesh in `conigure_model()` hook
+        self._device_mesh: Optional[DeviceMesh] = None
 
     @overload
-    def optimizers(self, use_pl_optimizer: Literal[True] = True) -> Union[LightningOptimizer, List[LightningOptimizer]]:
-        ...
+    def optimizers(
+        self, use_pl_optimizer: Literal[True] = True
+    ) -> Union[LightningOptimizer, list[LightningOptimizer]]: ...
 
     @overload
-    def optimizers(self, use_pl_optimizer: Literal[False]) -> Union[Optimizer, List[Optimizer]]:
-        ...
+    def optimizers(self, use_pl_optimizer: Literal[False]) -> Union[Optimizer, list[Optimizer]]: ...
 
     @overload
-    def optimizers(self, use_pl_optimizer: bool) -> MODULE_OPTIMIZERS:
-        ...
+    def optimizers(self, use_pl_optimizer: bool) -> MODULE_OPTIMIZERS: ...
 
     def optimizers(self, use_pl_optimizer: bool = True) -> MODULE_OPTIMIZERS:
         """Returns the optimizer(s) that are being used during training. Useful for manual optimization.
 
         Args:
             use_pl_optimizer: If ``True``, will wrap the optimizer(s) in a
-                :class:`~lightning.pytorch.core.optimizer.LightningOptimizer` for automatic handling of precision and
-                profiling.
+                :class:`~lightning.pytorch.core.optimizer.LightningOptimizer` for automatic handling of precision,
+                profiling, and counting of step calls for proper logging and checkpointing. It specifically wraps the
+                ``step`` method and custom optimizers that don't have this method are not supported.
 
         Returns:
             A single optimizer, or a list of optimizers in case multiple ones are present.
+
         """
         if self._fabric:
             opts: MODULE_OPTIMIZERS = self._fabric_optimizers
@@ -170,19 +185,19 @@ class LightningModule(
         # multiple opts
         return opts
 
-    def lr_schedulers(self) -> Union[None, List[LRSchedulerPLType], LRSchedulerPLType]:
-        """Returns the learning rate scheduler(s) that are being used during training. Useful for manual
-        optimization.
+    def lr_schedulers(self) -> Union[None, list[LRSchedulerPLType], LRSchedulerPLType]:
+        """Returns the learning rate scheduler(s) that are being used during training. Useful for manual optimization.
 
         Returns:
             A single scheduler, or a list of schedulers in case multiple ones are present, or ``None`` if no
-            schedulers were returned in :meth:`configure_optimizers`.
+            schedulers were returned in :meth:`~lightning.pytorch.core.LightningModule.configure_optimizers`.
+
         """
         if not self.trainer.lr_scheduler_configs:
             return None
 
         # ignore other keys "interval", "frequency", etc.
-        lr_schedulers: List[LRSchedulerPLType] = [config.scheduler for config in self.trainer.lr_scheduler_configs]
+        lr_schedulers: list[LRSchedulerPLType] = [config.scheduler for config in self.trainer.lr_scheduler_configs]
 
         # single scheduler
         if len(lr_schedulers) == 1:
@@ -204,9 +219,6 @@ class LightningModule(
         for v in self.children():
             if isinstance(v, LightningModule):
                 v.trainer = trainer  # type: ignore[assignment]
-        # https://github.com/pytorch/pytorch/issues/95857
-        if not _TORCH_GREATER_EQUAL_2_0 and trainer is not None and not isinstance(trainer, weakref.ProxyTypes):
-            trainer = weakref.proxy(trainer)
         self._trainer = trainer
 
     @property
@@ -223,9 +235,9 @@ class LightningModule(
         self._fabric = fabric
 
     @property
-    def example_input_array(self) -> Optional[Union[Tensor, Tuple, Dict]]:
-        """The example input array is a specification of what the module can consume in the :meth:`forward` method.
-        The return type is interpreted as follows:
+    def example_input_array(self) -> Optional[Union[Tensor, tuple, dict]]:
+        """The example input array is a specification of what the module can consume in the :meth:`forward` method. The
+        return type is interpreted as follows:
 
         -   Single tensor: It is assumed the model takes a single argument, i.e.,
             ``model.forward(model.example_input_array)``
@@ -233,11 +245,12 @@ class LightningModule(
             ``model.forward(*model.example_input_array)``
         -   Dict: The input array represents named keyword arguments, i.e.,
             ``model.forward(**model.example_input_array)``
+
         """
         return self._example_input_array
 
     @example_input_array.setter
-    def example_input_array(self, example: Optional[Union[Tensor, Tuple, Dict]]) -> None:
+    def example_input_array(self, example: Optional[Union[Tensor, tuple, dict]]) -> None:
         self._example_input_array = example
 
     @property
@@ -250,6 +263,7 @@ class LightningModule(
         """Total training batches seen across all epochs.
 
         If no Trainer is attached, this propery is 0.
+
         """
         return self.trainer.global_step if self._trainer else 0
 
@@ -268,6 +282,7 @@ class LightningModule(
         """Returns ``True`` if this model is currently located on a GPU.
 
         Useful to set flags around the LightningModule for different CPU vs GPU behavior.
+
         """
         return self.device.type == "cuda"
 
@@ -281,6 +296,16 @@ class LightningModule(
         self._automatic_optimization = automatic_optimization
 
     @property
+    def strict_loading(self) -> bool:
+        """Determines how Lightning loads this model using `.load_state_dict(..., strict=model.strict_loading)`."""
+        # We use None as the default internally to determine whether the user has set a value
+        return self._strict_loading in (None, True)
+
+    @strict_loading.setter
+    def strict_loading(self, strict_loading: bool) -> None:
+        self._strict_loading = strict_loading
+
+    @property
     def logger(self) -> Optional[Union[Logger, FabricLogger]]:
         """Reference to the logger object in the Trainer."""
         if self._fabric is not None:
@@ -288,13 +313,19 @@ class LightningModule(
         return self._trainer.logger if self._trainer is not None else None
 
     @property
-    def loggers(self) -> Union[List[Logger], List[FabricLogger]]:
+    def loggers(self) -> Union[list[Logger], list[FabricLogger]]:
         """Reference to the list of loggers in the Trainer."""
         if self._fabric is not None:
             return self._fabric.loggers
         if self._trainer is not None:
             return self._trainer.loggers
-        return []  # type: ignore[return-value]
+        return []
+
+    @property
+    def device_mesh(self) -> Optional["DeviceMesh"]:
+        """Strategies like ``ModelParallelStrategy`` will create a device mesh that can be accessed in the
+        :meth:`~lightning.pytorch.core.hooks.ModelHooks.configure_model` hook to parallelize the LightningModule."""
+        return self._device_mesh
 
     def _call_batch_hook(self, hook_name: str, *args: Any) -> Any:
         trainer = self._trainer
@@ -333,6 +364,7 @@ class LightningModule(
 
             def forward(self, x):
                 self.print(x, 'in forward')
+
         """
         if self.trainer.is_global_zero:
             progress_bar = self.trainer.progress_bar_callback
@@ -367,7 +399,7 @@ class LightningModule(
         The default behavior per hook is documented here: :ref:`extensions/logging:Automatic Logging`.
 
         Args:
-            name: key to log.
+            name: key to log. Must be identical across all processes if using DDP or any other distributed strategy.
             value: value to log. Can be a ``float``, ``Tensor``, or a ``Metric``.
             prog_bar: if ``True`` logs to the progress bar.
             logger: if ``True`` logs to the logger.
@@ -387,8 +419,11 @@ class LightningModule(
                 but for some data structures you might need to explicitly provide it.
             metric_attribute: To restore the metric state, Lightning requires the reference of the
                 :class:`torchmetrics.Metric` in your model. This is found automatically if it is a model attribute.
-            rank_zero_only: Whether the value will be logged only on rank 0. This will prevent synchronization which
-                would produce a deadlock as not all processes would perform this log call.
+            rank_zero_only: Tells Lightning if you are calling ``self.log`` from every process (default) or only from
+                rank 0. If ``True``, you won't be able to use this metric as a monitor in callbacks
+                (e.g., early stopping). Warning: Improper use can lead to deadlocks! See
+                :ref:`Advanced Logging <visualize/logging_advanced:rank_zero_only>` for more details.
+
         """
         if self._fabric is not None:
             self._log_dict_through_fabric(dictionary={name: value}, logger=logger)
@@ -491,7 +526,7 @@ class LightningModule(
             logger=logger,
             on_step=on_step,
             on_epoch=on_epoch,
-            reduce_fx=reduce_fx,  # type: ignore[arg-type]
+            reduce_fx=reduce_fx,
             enable_graph=enable_graph,
             add_dataloader_idx=add_dataloader_idx,
             batch_size=batch_size,
@@ -506,7 +541,7 @@ class LightningModule(
 
     def log_dict(
         self,
-        dictionary: Mapping[str, _METRIC],
+        dictionary: Union[Mapping[str, _METRIC], MetricCollection],
         prog_bar: bool = False,
         logger: Optional[bool] = None,
         on_step: Optional[bool] = None,
@@ -528,6 +563,7 @@ class LightningModule(
 
         Args:
             dictionary: key value pairs.
+                Keys must be identical across all processes if using DDP or any other distributed strategy.
                 The values can be a ``float``, ``Tensor``, ``Metric``, or ``MetricCollection``.
             prog_bar: if ``True`` logs to the progress base.
             logger: if ``True`` logs to the logger.
@@ -549,13 +585,16 @@ class LightningModule(
                 each dataloader to not mix values.
             batch_size: Current batch size. This will be directly inferred from the loaded batch,
                 but some data structures might need to explicitly provide it.
-            rank_zero_only: Whether the value will be logged only on rank 0. This will prevent synchronization which
-                would produce a deadlock as not all processes would perform this log call.
+            rank_zero_only: Tells Lightning if you are calling ``self.log`` from every process (default) or only from
+                rank 0. If ``True``, you won't be able to use this metric as a monitor in callbacks
+                (e.g., early stopping). Warning: Improper use can lead to deadlocks! See
+                :ref:`Advanced Logging <visualize/logging_advanced:rank_zero_only>` for more details.
+
         """
         if self._fabric is not None:
             return self._log_dict_through_fabric(dictionary=dictionary, logger=logger)
 
-        kwargs: Dict[str, bool] = {}
+        kwargs: dict[str, bool] = {}
 
         if isinstance(dictionary, MetricCollection):
             kwargs["keep_base"] = False
@@ -580,7 +619,9 @@ class LightningModule(
             )
         return None
 
-    def _log_dict_through_fabric(self, dictionary: Mapping[str, Any], logger: Optional[bool] = None) -> None:
+    def _log_dict_through_fabric(
+        self, dictionary: Union[Mapping[str, _METRIC], MetricCollection], logger: Optional[bool] = None
+    ) -> None:
         if logger is False:
             # Passing `logger=False` with Fabric does not make much sense because there is no other destination to
             # log to, but we support it in case the original code was written for Trainer use
@@ -592,7 +633,7 @@ class LightningModule(
             apply_to_collection(value, object, self.__check_allowed, name, value, wrong_dtype=(numbers.Number, Tensor))
 
         assert self._fabric is not None
-        self._fabric.log_dict(metrics=dictionary)
+        self._fabric.log_dict(metrics=dictionary)  # type: ignore[arg-type]
 
     @staticmethod
     def __check_not_nested(value: dict, name: str) -> None:
@@ -605,7 +646,11 @@ class LightningModule(
         raise ValueError(f"`self.log({name}, {value})` was called, but `{type(v).__name__}` values cannot be logged")
 
     def __to_tensor(self, value: Union[Tensor, numbers.Number], name: str) -> Tensor:
-        value = value.clone().detach() if isinstance(value, Tensor) else torch.tensor(value, device=self.device)
+        value = (
+            value.clone().detach()
+            if isinstance(value, Tensor)
+            else torch.tensor(value, device=self.device, dtype=_get_default_dtype())
+        )
         if not torch.numel(value) == 1:
             raise ValueError(
                 f"`self.log({name}, {value})` was called, but the tensor must have a single element."
@@ -615,11 +660,12 @@ class LightningModule(
         return value
 
     def all_gather(
-        self, data: Union[Tensor, Dict, List, Tuple], group: Optional[Any] = None, sync_grads: bool = False
-    ) -> Union[Tensor, Dict, List, Tuple]:
+        self, data: Union[Tensor, dict, list, tuple], group: Optional[Any] = None, sync_grads: bool = False
+    ) -> Union[Tensor, dict, list, tuple]:
         r"""Gather tensors or collections of tensors from multiple processes.
 
-        This method needs to be called on all processes. Failing to do so will cause your program to stall forever.
+        This method needs to be called on all processes and the tensors need to have the same shape across all
+        processes, otherwise your program will stall forever.
 
         Args:
             data: int, float, tensor of shape (batch, ...), or a (possibly nested) collection thereof.
@@ -628,13 +674,16 @@ class LightningModule(
 
         Return:
             A tensor of shape (world_size, batch, ...), or if the input was a collection
-            the output will also be a collection with tensors of this shape.
+            the output will also be a collection with tensors of this shape. For the special case where
+            world_size is 1, no additional dimension is added to the tensor(s).
+
         """
         group = group if group is not None else torch.distributed.group.WORLD
         all_gather = self.trainer.strategy.all_gather
         data = convert_to_tensors(data, device=self.device)
         return apply_to_collection(data, Tensor, all_gather, group=group, sync_grads=sync_grads)
 
+    @override
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         r"""Same as :meth:`torch.nn.Module.forward`.
 
@@ -644,25 +693,27 @@ class LightningModule(
 
         Return:
             Your model's output
+
         """
         return super().forward(*args, **kwargs)
 
-    def training_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:  # type: ignore[return-value]
+    def training_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         r"""Here you compute and return the training loss and some additional metrics for e.g. the progress bar or
         logger.
 
         Args:
-            batch (:class:`~torch.Tensor` | (:class:`~torch.Tensor`, ...) | [:class:`~torch.Tensor`, ...]):
-                The output of your :class:`~torch.utils.data.DataLoader`. A tensor, tuple or list.
-            batch_idx (``int``): Integer displaying index of this batch
+            batch: The output of your data iterable, normally a :class:`~torch.utils.data.DataLoader`.
+            batch_idx: The index of this batch.
+            dataloader_idx: The index of the dataloader that produced this batch.
+                (only if multiple dataloaders used)
 
         Return:
-            Any of.
-
             - :class:`~torch.Tensor` - The loss tensor
-            - ``dict`` - A dictionary. Can include any keys, but must include the key ``'loss'``
-            - ``None`` - Training will skip to the next batch. This is only for automatic optimization.
-                This is not supported for multi-GPU, TPU, IPU, or DeepSpeed.
+            - ``dict`` - A dictionary which can include any keys, but must include the key ``'loss'`` in the case of
+              automatic optimization.
+            - ``None`` - In automatic optimization, this will skip to the next batch (but is not supported for
+              multi-GPU, TPU, or DeepSpeed). For manual optimization, this has no special meaning, as returning
+              the loss is not required.
 
         In this step you'd normally do the forward pass and calculate the loss for a batch.
         You can also do fancier things like multiple forward passes or something model specific.
@@ -698,33 +749,33 @@ class LightningModule(
         Note:
             When ``accumulate_grad_batches`` > 1, the loss returned here will be automatically
             normalized by ``accumulate_grad_batches`` internally.
+
         """
         rank_zero_warn("`training_step` must be implemented to be used with the Lightning Trainer")
 
-    def validation_step(self, *args: Any, **kwargs: Any) -> Optional[STEP_OUTPUT]:
-        r"""Operates on a single batch of data from the validation set. In this step you'd might generate examples
-        or calculate anything of interest like accuracy.
+    def validation_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+        r"""Operates on a single batch of data from the validation set. In this step you'd might generate examples or
+        calculate anything of interest like accuracy.
 
         Args:
-            batch: The output of your :class:`~torch.utils.data.DataLoader`.
+            batch: The output of your data iterable, normally a :class:`~torch.utils.data.DataLoader`.
             batch_idx: The index of this batch.
             dataloader_idx: The index of the dataloader that produced this batch.
-                (only if multiple val dataloaders used)
+                (only if multiple dataloaders used)
 
         Return:
-            - Any object or value
-            - ``None`` - Validation will skip to the next batch
+            - :class:`~torch.Tensor` - The loss tensor
+            - ``dict`` - A dictionary. Can include any keys, but must include the key ``'loss'``.
+            - ``None`` - Skip to the next batch.
 
         .. code-block:: python
 
             # if you have one val dataloader:
-            def validation_step(self, batch, batch_idx):
-                ...
+            def validation_step(self, batch, batch_idx): ...
 
 
             # if you have multiple val dataloaders:
-            def validation_step(self, batch, batch_idx, dataloader_idx=0):
-                ...
+            def validation_step(self, batch, batch_idx, dataloader_idx=0): ...
 
         Examples::
 
@@ -766,34 +817,32 @@ class LightningModule(
             When the :meth:`validation_step` is called, the model has been put in eval mode
             and PyTorch gradients have been disabled. At the end of validation,
             the model goes back to training mode and gradients are enabled.
+
         """
 
-    def test_step(self, *args: Any, **kwargs: Any) -> Optional[STEP_OUTPUT]:
+    def test_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         r"""Operates on a single batch of data from the test set. In this step you'd normally generate examples or
         calculate anything of interest such as accuracy.
 
         Args:
-            batch: The output of your :class:`~torch.utils.data.DataLoader`.
+            batch: The output of your data iterable, normally a :class:`~torch.utils.data.DataLoader`.
             batch_idx: The index of this batch.
-            dataloader_id: The index of the dataloader that produced this batch.
-                (only if multiple test dataloaders used).
+            dataloader_idx: The index of the dataloader that produced this batch.
+                (only if multiple dataloaders used)
 
         Return:
-           Any of.
-
-            - Any object or value
-            - ``None`` - Testing will skip to the next batch
+            - :class:`~torch.Tensor` - The loss tensor
+            - ``dict`` - A dictionary. Can include any keys, but must include the key ``'loss'``.
+            - ``None`` - Skip to the next batch.
 
         .. code-block:: python
 
             # if you have one test dataloader:
-            def test_step(self, batch, batch_idx):
-                ...
+            def test_step(self, batch, batch_idx): ...
 
 
             # if you have multiple test dataloaders:
-            def test_step(self, batch, batch_idx, dataloader_idx=0):
-                ...
+            def test_step(self, batch, batch_idx, dataloader_idx=0): ...
 
         Examples::
 
@@ -835,13 +884,14 @@ class LightningModule(
             When the :meth:`test_step` is called, the model has been put in eval mode and
             PyTorch gradients have been disabled. At the end of the test epoch, the model goes back
             to training mode and gradients are enabled.
+
         """
 
-    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
-        """Step function called during :meth:`~lightning.pytorch.trainer.trainer.Trainer.predict`. By default, it
-        calls :meth:`~lightning.pytorch.core.module.LightningModule.forward`. Override to add any processing logic.
+    def predict_step(self, *args: Any, **kwargs: Any) -> Any:
+        """Step function called during :meth:`~lightning.pytorch.trainer.trainer.Trainer.predict`. By default, it calls
+        :meth:`~lightning.pytorch.core.LightningModule.forward`. Override to add any processing logic.
 
-        The :meth:`~lightning.pytorch.core.module.LightningModule.predict_step` is used
+        The :meth:`~lightning.pytorch.core.LightningModule.predict_step` is used
         to scale inference on multi-devices.
 
         To prevent an OOM error, it is possible to use :class:`~lightning.pytorch.callbacks.BasePredictionWriter`
@@ -850,6 +900,15 @@ class LightningModule(
         The :class:`~lightning.pytorch.callbacks.BasePredictionWriter` should be used while using a spawn
         based accelerator. This happens for ``Trainer(strategy="ddp_spawn")``
         or training on 8 TPU cores with ``Trainer(accelerator="tpu", devices=8)`` as predictions won't be returned.
+
+        Args:
+            batch: The output of your data iterable, normally a :class:`~torch.utils.data.DataLoader`.
+            batch_idx: The index of this batch.
+            dataloader_idx: The index of the dataloader that produced this batch.
+                (only if multiple dataloaders used)
+
+        Return:
+            Predicted output (optional).
 
         Example ::
 
@@ -863,24 +922,17 @@ class LightningModule(
             trainer = Trainer(accelerator="gpu", devices=2)
             predictions = trainer.predict(model, dm)
 
-
-        Args:
-            batch: Current batch.
-            batch_idx: Index of current batch.
-            dataloader_idx: Index of the current dataloader.
-
-        Return:
-            Predicted output
         """
+        # For backwards compatibility
+        batch = kwargs.get("batch", args[0])
         return self(batch)
 
     def configure_callbacks(self) -> Union[Sequence[Callback], Callback]:
-        """Configure model-specific callbacks. When the model gets attached, e.g., when ``.fit()`` or ``.test()``
-        gets called, the list or a callback returned here will be merged with the list of callbacks passed to the
-        Trainer's ``callbacks`` argument. If a callback returned here has the same type as one or several callbacks
-        already present in the Trainer's callbacks list, it will take priority and replace them. In addition,
-        Lightning will make sure :class:`~lightning.pytorch.callbacks.model_checkpoint.ModelCheckpoint` callbacks
-        run last.
+        """Configure model-specific callbacks. When the model gets attached, e.g., when ``.fit()`` or ``.test()`` gets
+        called, the list or a callback returned here will be merged with the list of callbacks passed to the Trainer's
+        ``callbacks`` argument. If a callback returned here has the same type as one or several callbacks already
+        present in the Trainer's callbacks list, it will take priority and replace them. In addition, Lightning will
+        make sure :class:`~lightning.pytorch.callbacks.model_checkpoint.ModelCheckpoint` callbacks run last.
 
         Return:
             A callback or a list of callbacks which will extend the list of callbacks in the Trainer.
@@ -891,13 +943,14 @@ class LightningModule(
                 early_stop = EarlyStopping(monitor="val_acc", mode="max")
                 checkpoint = ModelCheckpoint(monitor="val_loss")
                 return [early_stop, checkpoint]
+
         """
         return []
 
-    def configure_optimizers(self) -> Any:
-        r"""Choose what optimizers and learning-rate schedulers to use in your optimization. Normally you'd need
-        one. But in the case of GANs or similar you might have multiple. Optimization with multiple optimizers only
-        works in the manual optimization mode.
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        r"""Choose what optimizers and learning-rate schedulers to use in your optimization. Normally you'd need one.
+        But in the case of GANs or similar you might have multiple. Optimization with multiple optimizers only works in
+        the manual optimization mode.
 
         Return:
             Any of these 6 options.
@@ -926,7 +979,7 @@ class LightningModule(
                 # `scheduler.step()`. 1 corresponds to updating the learning
                 # rate after every epoch/step.
                 "frequency": 1,
-                # Metric to to monitor for schedulers like `ReduceLROnPlateau`
+                # Metric to monitor for schedulers like `ReduceLROnPlateau`
                 "monitor": "val_loss",
                 # If set to `True`, will enforce that the value specified 'monitor'
                 # is available when the scheduler is updated, thus stopping
@@ -953,7 +1006,7 @@ class LightningModule(
                     "lr_scheduler": {
                         "scheduler": ReduceLROnPlateau(optimizer, ...),
                         "monitor": "metric_to_track",
-                        "frequency": "indicates how often the metric is updated"
+                        "frequency": "indicates how often the metric is updated",
                         # If "monitor" references validation metrics, then "frequency" should be set to a
                         # multiple of "trainer.check_val_every_n_epoch".
                     },
@@ -978,7 +1031,7 @@ class LightningModule(
                 )
 
         Metrics can be made available to monitor by simply logging it using
-        ``self.log('metric_to_track', metric_val)`` in your :class:`~lightning.pytorch.core.module.LightningModule`.
+        ``self.log('metric_to_track', metric_val)`` in your :class:`~lightning.pytorch.core.LightningModule`.
 
         Note:
             Some things to know:
@@ -992,6 +1045,7 @@ class LightningModule(
             - If you use multiple optimizers, you will have to switch to 'manual optimization' mode and step them
               yourself.
             - If you need to control how often the optimizer steps, override the :meth:`optimizer_step` hook.
+
         """
         rank_zero_warn("`configure_optimizers` must be implemented to be used with the Lightning Trainer")
 
@@ -1015,6 +1069,7 @@ class LightningModule(
             loss: The tensor on which to compute gradients. Must have a graph attached.
             *args: Additional positional arguments to be forwarded to :meth:`~torch.Tensor.backward`
             **kwargs: Additional keyword arguments to be forwarded to :meth:`~torch.Tensor.backward`
+
         """
         if self._fabric:
             self._fabric.backward(loss, *args, **kwargs)
@@ -1023,8 +1078,8 @@ class LightningModule(
             self.trainer.strategy.backward(loss, None, *args, **kwargs)
 
     def backward(self, loss: Tensor, *args: Any, **kwargs: Any) -> None:
-        """Called to perform backward on the loss returned in :meth:`training_step`. Override this hook with your
-        own implementation if you need to.
+        """Called to perform backward on the loss returned in :meth:`training_step`. Override this hook with your own
+        implementation if you need to.
 
         Args:
             loss: The loss tensor returned by :meth:`training_step`. If gradient accumulation is used, the loss here
@@ -1034,6 +1089,7 @@ class LightningModule(
 
             def backward(self, loss):
                 loss.backward()
+
         """
         if self._fabric:
             self._fabric.backward(loss, *args, **kwargs)
@@ -1041,13 +1097,14 @@ class LightningModule(
             loss.backward(*args, **kwargs)
 
     def toggle_optimizer(self, optimizer: Union[Optimizer, LightningOptimizer]) -> None:
-        """Makes sure only the gradients of the current optimizer's parameters are calculated in the training step
-        to prevent dangling gradients in multiple-optimizer setup.
+        """Makes sure only the gradients of the current optimizer's parameters are calculated in the training step to
+        prevent dangling gradients in multiple-optimizer setup.
 
         It works with :meth:`untoggle_optimizer` to make sure ``param_requires_grad_state`` is properly reset.
 
         Args:
             optimizer: The optimizer to toggle.
+
         """
         # Iterate over all optimizer parameters to preserve their `requires_grad` information
         # in case these are pre-defined during `configure_optimizers`
@@ -1063,7 +1120,7 @@ class LightningModule(
 
         # Then iterate over the current optimizer's parameters and set its `requires_grad`
         # properties accordingly
-        for group in optimizer.param_groups:  # type: ignore[union-attr]
+        for group in optimizer.param_groups:
             for param in group["params"]:
                 param.requires_grad = param_requires_grad_state[param]
         self._param_requires_grad_state = param_requires_grad_state
@@ -1073,6 +1130,7 @@ class LightningModule(
 
         Args:
             optimizer: The optimizer to untoggle.
+
         """
         for opt in self.trainer.optimizers:
             if not (opt is optimizer or (isinstance(optimizer, LightningOptimizer) and opt is optimizer.optimizer)):
@@ -1104,6 +1162,7 @@ class LightningModule(
             gradient_clip_val: The value at which to clip gradients.
             gradient_clip_algorithm: The gradient clipping algorithm to use. Pass ``gradient_clip_algorithm="value"``
                 to clip by value, and ``gradient_clip_algorithm="norm"`` to clip by norm.
+
         """
 
         if self.fabric is not None:
@@ -1175,17 +1234,16 @@ class LightningModule(
                     gradient_clip_val=gradient_clip_val,
                     gradient_clip_algorithm=gradient_clip_algorithm
                 )
+
         """
         self.clip_gradients(
             optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm
         )
 
     def lr_scheduler_step(self, scheduler: LRSchedulerTypeUnion, metric: Optional[Any]) -> None:
-        r"""
-        Override this method to adjust the default way the
-        :class:`~lightning.pytorch.trainer.trainer.Trainer` calls each scheduler.
-        By default, Lightning calls ``step()`` and as shown in the example
-        for each scheduler based on its ``interval``.
+        r"""Override this method to adjust the default way the :class:`~lightning.pytorch.trainer.trainer.Trainer` calls
+        each scheduler. By default, Lightning calls ``step()`` and as shown in the example for each scheduler based on
+        its ``interval``.
 
         Args:
             scheduler: Learning rate scheduler.
@@ -1217,8 +1275,8 @@ class LightningModule(
         optimizer: Union[Optimizer, LightningOptimizer],
         optimizer_closure: Optional[Callable[[], Any]] = None,
     ) -> None:
-        r"""Override this method to adjust the default way the :class:`~lightning.pytorch.trainer.trainer.Trainer`
-        calls the optimizer.
+        r"""Override this method to adjust the default way the :class:`~lightning.pytorch.trainer.trainer.Trainer` calls
+        the optimizer.
 
         By default, Lightning calls ``step()`` and ``zero_grad()`` as shown in the example.
         This method (and ``zero_grad()``) won't be called during the accumulation phase when
@@ -1233,20 +1291,13 @@ class LightningModule(
 
         Examples::
 
-            # DEFAULT
             def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
+                # Add your custom logic to run directly before `optimizer.step()`
+
                 optimizer.step(closure=optimizer_closure)
 
-            # Learning rate warm-up
-            def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
-                # update params
-                optimizer.step(closure=optimizer_closure)
+                # Add your custom logic to run directly after `optimizer.step()`
 
-                # manually warm up lr without a scheduler
-                if self.trainer.global_step < 500:
-                    lr_scale = min(1.0, float(self.trainer.global_step + 1) / 500.0)
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = lr_scale * self.learning_rate
         """
         optimizer.step(closure=optimizer_closure)
 
@@ -1269,6 +1320,7 @@ class LightningModule(
                 optimizer.zero_grad(set_to_none=True)
 
         See :meth:`torch.optim.Optimizer.zero_grad` for the explanation of the above example.
+
         """
         optimizer.zero_grad()
 
@@ -1279,6 +1331,7 @@ class LightningModule(
 
             model = MyLightningModule(...)
             model.freeze()
+
         """
         for param in self.parameters():
             param.requires_grad = False
@@ -1292,6 +1345,7 @@ class LightningModule(
 
             model = MyLightningModule(...)
             model.unfreeze()
+
         """
         for param in self.parameters():
             param.requires_grad = True
@@ -1306,7 +1360,7 @@ class LightningModule(
             )
 
     @torch.no_grad()
-    def to_onnx(self, file_path: Union[str, Path], input_sample: Optional[Any] = None, **kwargs: Any) -> None:
+    def to_onnx(self, file_path: Union[str, Path, BytesIO], input_sample: Optional[Any] = None, **kwargs: Any) -> None:
         """Saves the model in ONNX format.
 
         Args:
@@ -1327,11 +1381,10 @@ class LightningModule(
             model = SimpleModel()
             input_sample = torch.randn(1, 64)
             model.to_onnx("export.onnx", input_sample, export_params=True)
+
         """
-        if _TORCH_GREATER_EQUAL_2_0 and not _ONNX_AVAILABLE:
-            raise ModuleNotFoundError(
-                f"`torch>=2.0` requires `onnx` to be installed to use `{type(self).__name__}.to_onnx()`"
-            )
+        if not _ONNX_AVAILABLE:
+            raise ModuleNotFoundError(f"`{type(self).__name__}.to_onnx()` requires `onnx` to be installed.")
 
         mode = self.training
 
@@ -1346,7 +1399,10 @@ class LightningModule(
         input_sample = self._on_before_batch_transfer(input_sample)
         input_sample = self._apply_batch_transfer_handler(input_sample)
 
-        torch.onnx.export(self, input_sample, file_path, **kwargs)
+        file_path = str(file_path) if isinstance(file_path, Path) else file_path
+        # PyTorch (2.5) declares file_path to be str | PathLike[Any] | None, but
+        #               BytesIO does work, too.
+        torch.onnx.export(self, input_sample, file_path, **kwargs)  # type: ignore
         self.train(mode)
 
     @torch.no_grad()
@@ -1356,12 +1412,12 @@ class LightningModule(
         method: Optional[str] = "script",
         example_inputs: Optional[Any] = None,
         **kwargs: Any,
-    ) -> Union[ScriptModule, Dict[str, ScriptModule]]:
+    ) -> Union[ScriptModule, dict[str, ScriptModule]]:
         """By default compiles the whole model to a :class:`~torch.jit.ScriptModule`. If you want to use tracing,
         please provided the argument ``method='trace'`` and make sure that either the `example_inputs` argument is
-        provided, or the model has :attr:`example_input_array` set. If you would like to customize the modules that
-        are scripted you should override this method. In case you want to return multiple modules, we recommend
-        using a dictionary.
+        provided, or the model has :attr:`example_input_array` set. If you would like to customize the modules that are
+        scripted you should override this method. In case you want to return multiple modules, we recommend using a
+        dictionary.
 
         Args:
             file_path: Path where to save the torchscript. Default: None (no file saved).
@@ -1373,7 +1429,7 @@ class LightningModule(
 
         Note:
             - Requires the implementation of the
-              :meth:`~lightning.pytorch.core.module.LightningModule.forward` method.
+              :meth:`~lightning.pytorch.core.LightningModule.forward` method.
             - The exported script will be set to evaluation mode.
             - It is recommended that you install the latest supported version of PyTorch
               to use this feature without limitations. See also the :mod:`torch.jit`
@@ -1399,6 +1455,7 @@ class LightningModule(
         Return:
             This LightningModule as a torchscript, regardless of whether `file_path` is
             defined or not.
+
         """
         mode = self.training
 
@@ -1432,18 +1489,17 @@ class LightningModule(
 
         return torchscript_module
 
-    @classmethod
+    @_restricted_classmethod
     def load_from_checkpoint(
         cls,
         checkpoint_path: Union[_PATH, IO],
         map_location: _MAP_LOCATION_TYPE = None,
         hparams_file: Optional[_PATH] = None,
-        strict: bool = True,
+        strict: Optional[bool] = None,
         **kwargs: Any,
     ) -> Self:
-        r"""
-        Primary way of loading a model from a checkpoint. When Lightning saves a checkpoint
-        it stores the arguments passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
+        r"""Primary way of loading a model from a checkpoint. When Lightning saves a checkpoint it stores the arguments
+        passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
 
         Any arguments specified through \*\*kwargs will override args stored in ``"hyper_parameters"``.
 
@@ -1471,7 +1527,8 @@ class LightningModule(
                 and ``.yaml`` file has hierarchical structure, you need to refactor your model to treat
                 ``hparams`` as :class:`~dict`.
             strict: Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys
-                returned by this module's state dict.
+                returned by this module's state dict. Defaults to ``True`` unless ``LightningModule.strict_loading`` is
+                set, in which case it defaults to the value of ``LightningModule.strict_loading``.
             \**kwargs: Any extra keyword args needed to init the model. Can also be used to override saved
                 hyperparameter values.
 
@@ -1480,7 +1537,15 @@ class LightningModule(
 
         Note:
             ``load_from_checkpoint`` is a **class** method. You should use your :class:`LightningModule`
-            **class** to call it instead of the :class:`LightningModule` instance.
+            **class** to call it instead of the :class:`LightningModule` instance, or a
+            ``TypeError`` will be raised.
+
+        Note:
+            To ensure all layers can be loaded from the checkpoint, this function will call
+            :meth:`~lightning.pytorch.core.hooks.ModelHooks.configure_model` directly after instantiating the
+            model if this hook is overridden in your LightningModule. However, note that ``load_from_checkpoint`` does
+            not support loading sharded checkpoints, and you may run out of memory if the model is too large. In this
+            case, consider loading through the Trainer via ``.fit(ckpt_path=...)``.
 
         Example::
 
@@ -1511,6 +1576,7 @@ class LightningModule(
             pretrained_model.eval()
             pretrained_model.freeze()
             y_hat = pretrained_model(x)
+
         """
         loaded = _load_from_checkpoint(
             cls,
@@ -1522,35 +1588,11 @@ class LightningModule(
         )
         return cast(Self, loaded)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    @override
+    def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_trainer"] = None
         return state
-
-    def _register_sharded_tensor_state_dict_hooks_if_available(self) -> None:
-        """Adds ShardedTensor state dict hooks if ShardedTensors are supported.
-
-        These hooks ensure that ShardedTensors are included when saving, and are loaded the LightningModule correctly.
-        """
-        if _TORCH_GREATER_EQUAL_2_1:
-            # ShardedTensor is deprecated in favor of DistributedTensor
-            return
-        if _IS_WINDOWS or not torch.distributed.is_available():
-            rank_zero_debug("Could not register sharded tensor state dict hooks")
-            return
-
-        from torch.distributed._shard.sharded_tensor import pre_load_state_dict_hook, state_dict_hook
-
-        self._register_state_dict_hook(state_dict_hook)
-
-        if compare_version("torch", operator.ge, "1.13.0", use_base_version=True):
-            # See https://github.com/Lightning-AI/lightning/issues/16644 for why a base-version check is used here
-            self._register_load_state_dict_pre_hook(pre_load_state_dict_hook, True)
-        else:
-            # We need to make sure the self inside the method is a weakref proxy
-            self.__class__._register_load_state_dict_pre_hook(
-                weakref.proxy(self), pre_load_state_dict_hook, True  # type: ignore[arg-type]
-            )
 
 
 @contextmanager

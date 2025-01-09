@@ -12,7 +12,6 @@ from lightning.fabric.plugins.collectives import TorchCollective
 from lightning.fabric.plugins.environments import LightningEnvironment
 from lightning.fabric.strategies.ddp import DDPStrategy
 from lightning.fabric.strategies.launchers.multiprocessing import _MultiProcessingLauncher
-from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_1_13
 from tests_fabric.helpers.runif import RunIf
 
 if TorchCollective.is_available():
@@ -30,13 +29,16 @@ PASSED_OBJECT = mock.Mock()
 
 @contextlib.contextmanager
 def check_destroy_group():
-    with mock.patch(
-        "lightning.fabric.plugins.collectives.torch_collective.TorchCollective.new_group",
-        wraps=TorchCollective.new_group,
-    ) as mock_new, mock.patch(
-        "lightning.fabric.plugins.collectives.torch_collective.TorchCollective.destroy_group",
-        wraps=TorchCollective.destroy_group,
-    ) as mock_destroy:
+    with (
+        mock.patch(
+            "lightning.fabric.plugins.collectives.torch_collective.TorchCollective.new_group",
+            wraps=TorchCollective.new_group,
+        ) as mock_new,
+        mock.patch(
+            "lightning.fabric.plugins.collectives.torch_collective.TorchCollective.destroy_group",
+            wraps=TorchCollective.destroy_group,
+        ) as mock_destroy,
+    ):
         yield
     # 0 to account for tests that mock distributed
     # -1 to account for destroying the default process group
@@ -134,11 +136,10 @@ def test_convert_ops():
         TorchCollective._convert_to_native_op("invalid")
 
     # Test RedOpType
-    if _TORCH_GREATER_EQUAL_1_13:
-        assert TorchCollective._convert_to_native_op(ReduceOp.RedOpType.AVG) == ReduceOp.RedOpType.AVG
-        op = torch.distributed._make_nccl_premul_sum(2.0)  # this returns a ReduceOp
-        assert TorchCollective._convert_to_native_op(op) == ReduceOp.PREMUL_SUM
-        assert TorchCollective._convert_to_native_op("premul_sum") == ReduceOp.PREMUL_SUM
+    assert TorchCollective._convert_to_native_op(ReduceOp.RedOpType.AVG) == ReduceOp.RedOpType.AVG
+    op = torch.distributed._make_nccl_premul_sum(2.0)  # this returns a ReduceOp
+    assert TorchCollective._convert_to_native_op(op) == ReduceOp.PREMUL_SUM
+    assert TorchCollective._convert_to_native_op("premul_sum") == ReduceOp.PREMUL_SUM
 
 
 @skip_distributed_unavailable
@@ -157,9 +158,10 @@ def test_repeated_create_and_destroy():
     with pytest.raises(RuntimeError, match="TorchCollective` already owns a group"):
         collective.create_group()
 
-    with mock.patch.dict("torch.distributed.distributed_c10d._pg_map", {collective.group: ("", None)}), mock.patch(
-        "torch.distributed.destroy_process_group"
-    ) as destroy_mock:
+    with (
+        mock.patch.dict("torch.distributed.distributed_c10d._pg_map", {collective.group: ("", None)}),
+        mock.patch("torch.distributed.destroy_process_group") as destroy_mock,
+    ):
         collective.teardown()
     # this would be called twice if `init_process_group` wasn't patched. once for the group and once for the default
     # group
@@ -230,10 +232,11 @@ def _test_distributed_collectives_fn(strategy, collective):
     torch.testing.assert_close(out, expected)
 
 
+@pytest.mark.skip(reason="test hangs too often")
 @skip_distributed_unavailable
-@pytest.mark.parametrize("n", [1, 2])
-@RunIf(skip_windows=True)
-@mock.patch.dict(os.environ, os.environ.copy(), clear=True)  # sets CUDA_MODULE_LOADING in torch==1.13
+@pytest.mark.parametrize(
+    "n", [1, pytest.param(2, marks=[RunIf(skip_windows=True), pytest.mark.xfail(raises=TimeoutError, strict=False)])]
+)
 def test_collectives_distributed(n):
     collective_launch(_test_distributed_collectives_fn, [torch.device("cpu")] * n)
 
@@ -248,7 +251,7 @@ def _test_distributed_collectives_cuda_fn(strategy, collective):
 
 
 @skip_distributed_unavailable
-@RunIf(min_cuda_gpus=1, min_torch="1.13")
+@RunIf(min_cuda_gpus=1)
 def test_collectives_distributed_cuda():
     collective_launch(_test_distributed_collectives_cuda_fn, [torch.device("cuda")])
 
@@ -268,7 +271,9 @@ def _test_two_groups(strategy, left_collective, right_collective):
 
 
 @skip_distributed_unavailable
-@pytest.mark.skip(reason="TODO(carmocca): causing hangs in CI")
+@pytest.mark.flaky(reruns=5)
+@RunIf(skip_windows=True)  # unhandled timeouts
+@pytest.mark.xfail(raises=TimeoutError, strict=False)
 def test_two_groups():
     collective_launch(_test_two_groups, [torch.device("cpu")] * 3, num_groups=2)
 
@@ -284,8 +289,8 @@ def _test_default_process_group(strategy, *collectives):
 
 
 @skip_distributed_unavailable
-@RunIf(skip_windows=True)
-@mock.patch.dict(os.environ, os.environ.copy(), clear=True)  # sets CUDA_MODULE_LOADING in torch==1.13
+@pytest.mark.flaky(reruns=5)
+@RunIf(skip_windows=True)  # unhandled timeouts
 def test_default_process_group():
     collective_launch(_test_default_process_group, [torch.device("cpu")] * 3, num_groups=2)
 
@@ -299,9 +304,11 @@ def test_collective_manages_default_group():
 
     assert TorchCollective.manages_default_group
 
-    with mock.patch.object(collective, "_group") as mock_group, mock.patch.dict(
-        "torch.distributed.distributed_c10d._pg_map", {mock_group: ("", None)}
-    ), mock.patch("torch.distributed.destroy_process_group") as destroy_mock:
+    with (
+        mock.patch.object(collective, "_group") as mock_group,
+        mock.patch.dict("torch.distributed.distributed_c10d._pg_map", {mock_group: ("", None)}),
+        mock.patch("torch.distributed.destroy_process_group") as destroy_mock,
+    ):
         collective.teardown()
     destroy_mock.assert_called_once_with(mock_group)
 

@@ -10,7 +10,7 @@ The Strategy in PyTorch Lightning handles the following responsibilities:
 * Launch and teardown of training processes (if applicable).
 * Setup communication between processes (NCCL, GLOO, MPI, and so on).
 * Provide a unified communication interface for reduction, broadcast, and so on.
-* Owns the :class:`~lightning.pytorch.core.module.LightningModule`
+* Owns the :class:`~lightning.pytorch.core.LightningModule`
 * Handles/owns optimizers and schedulers.
 
 
@@ -34,7 +34,7 @@ Built-in strategies can be selected in two ways.
 1. Pass the shorthand name to the ``strategy`` Trainer argument
 2. Import a Strategy from :mod:`lightning.pytorch.strategies`, instantiate it and pass it to the ``strategy`` Trainer argument
 
-The latter allows you to configure further options on the specifc strategy.
+The latter allows you to configure further options on the specific strategy.
 Here are some examples:
 
 .. code-block:: python
@@ -57,9 +57,6 @@ Here are some examples:
     # Training with the DDP Spawn strategy on 8 TPU cores
     trainer = Trainer(strategy="ddp_spawn", accelerator="tpu", devices=8)
 
-    # Training with the default IPU strategy on 8 IPUs
-    trainer = Trainer(accelerator="ipu", devices=8)
-
 The below table lists all relevant strategies available in Lightning with their corresponding short-hand name:
 
 .. list-table:: Strategy Classes and Nicknames
@@ -71,25 +68,22 @@ The below table lists all relevant strategies available in Lightning with their 
      - Description
    * - fsdp
      - :class:`~lightning.pytorch.strategies.FSDPStrategy`
-     - Strategy for Fully Sharded Data Parallel training. :ref:`Learn more. <advanced/model_parallel:Fully Sharded Training>`
+     - Strategy for Fully Sharded Data Parallel training. :doc:`Learn more. <../advanced/model_parallel/fsdp>`
    * - ddp
      - :class:`~lightning.pytorch.strategies.DDPStrategy`
      - Strategy for multi-process single-device training on one or multiple nodes. :ref:`Learn more. <accelerators/gpu_intermediate:Distributed Data Parallel>`
    * - ddp_spawn
      - :class:`~lightning.pytorch.strategies.DDPStrategy`
-     - Same as "ddp" but launches processes using :func:`torch.multiprocessing.spawn` method and joins processes after training finishes. :ref:`Learn more. <accelerators/gpu_intermediate:Distributed Data Parallel Spawn>`
+     - Same as "ddp" but launches processes using ``torch.multiprocessing.spawn`` method and joins processes after training finishes. :ref:`Learn more. <accelerators/gpu_intermediate:Distributed Data Parallel Spawn>`
    * - deepspeed
      - :class:`~lightning.pytorch.strategies.DeepSpeedStrategy`
-     - Provides capabilities to run training using the DeepSpeed library, with training optimizations for large billion parameter models. :ref:`Learn more. <advanced/model_parallel:deepspeed>`
+     - Provides capabilities to run training using the DeepSpeed library, with training optimizations for large billion parameter models. :doc:`Learn more. <../advanced/model_parallel/deepspeed>`
    * - hpu_parallel
      - ``HPUParallelStrategy``
-     - Strategy for distributed training on multiple HPU devices. :doc:`Learn more. <../accelerators/hpu>`
+     - Strategy for distributed training on multiple HPU devices. :doc:`Learn more. <../integrations/hpu/index>`
    * - hpu_single
      - ``SingleHPUStrategy``
-     - Strategy for training on a single HPU device. :doc:`Learn more. <../accelerators/hpu>`
-   * - ipu_strategy
-     - ``IPUStrategy``
-     - Plugin for training on IPU devices. :doc:`Learn more. <../accelerators/ipu>`
+     - Strategy for training on a single HPU device. :doc:`Learn more. <../integrations/hpu/index>`
    * - xla
      - :class:`~lightning.pytorch.strategies.XLAStrategy`
      - Strategy for training on multiple TPU devices using the :func:`torch_xla.distributed.xla_multiprocessing.spawn` method. :doc:`Learn more. <../accelerators/tpu>`
@@ -105,24 +99,7 @@ Third-party Strategies
 **********************
 
 There are powerful third-party strategies that integrate well with Lightning but aren't maintained as part of the ``lightning`` package.
-
-.. list-table:: List of third-party strategy implementations
-   :widths: 20 20 20
-   :header-rows: 1
-
-   * - Name
-     - Package
-     - Description
-   * - ColossalAI
-     - `Lightning-AI/lightning-colossalai <https://github.com/Lightning-AI/lightning-colossalai>`_
-     - Colossal-AI provides a collection of parallel components for you. It aims to support you to write your distributed deep learning models just like how you write your model on your laptop. `Learn more. <https://www.colossalai.org/>`__
-   * - Bagua
-     - `Lightning-AI/lightning-Bagua <https://github.com/Lightning-AI/lightning-Bagua>`_
-     - Bagua is a deep learning training acceleration framework for PyTorch, with advanced distributed training algorithms and system optimizations. `Learn more. <https://tutorials.baguasys.com/>`__
-   * - hivemind
-     - `Lightning-AI/lightning-hivemind <https://github.com/Lightning-AI/lightning-hivemind>`_
-     - Hivemind is a PyTorch library for decentralized deep learning across the Internet. Its intended usage is training one large model on hundreds of computers from different universities, companies, and volunteers. `Learn more. <https://github.com/learning-at-home/hivemind>`__
-
+Checkout the gallery over :doc:`here <../integrations/strategies/index>`.
 
 ----
 

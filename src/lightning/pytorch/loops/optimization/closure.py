@@ -13,7 +13,7 @@
 # limitations under the License.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Generic, Optional, TypeVar
+from typing import Any, Generic, Optional, TypeVar
 
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
@@ -22,7 +22,7 @@ T = TypeVar("T")
 
 @dataclass
 class OutputResult:
-    def asdict(self) -> Dict[str, Any]:
+    def asdict(self) -> dict[str, Any]:
         raise NotImplementedError
 
 
@@ -35,6 +35,7 @@ class AbstractClosure(ABC, Generic[T]):
 
     This class provides a simple abstraction making the instance of this class callable like a function while capturing
     the closure result and caching it.
+
     """
 
     def __init__(self) -> None:
@@ -46,6 +47,7 @@ class AbstractClosure(ABC, Generic[T]):
 
         Once accessed, the internal reference gets reset and the consumer will have to hold on to the reference as long
         as necessary.
+
         """
         if self._result is None:
             raise MisconfigurationException(

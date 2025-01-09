@@ -56,7 +56,13 @@ def run(hparams):
     torch.manual_seed(hparams.seed)
 
     use_cuda = torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
+    use_mps = torch.backends.mps.is_available()
+    if use_cuda:
+        device = torch.device("cuda")
+    elif use_mps:
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     transform = T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
     train_dataset = MNIST(DATASETS_PATH, train=True, download=True, transform=transform)
@@ -85,13 +91,8 @@ def run(hparams):
             optimizer.step()
             if (batch_idx == 0) or ((batch_idx + 1) % hparams.log_interval == 0):
                 print(
-                    "Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}".format(
-                        epoch,
-                        batch_idx * len(data),
-                        len(train_loader.dataset),
-                        100.0 * batch_idx / len(train_loader),
-                        loss.item(),
-                    )
+                    f"Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)}"
+                    f" ({100.0 * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}"
                 )
                 if hparams.dry_run:
                     break
@@ -114,9 +115,8 @@ def run(hparams):
         test_loss /= len(test_loader.dataset)
 
         print(
-            "\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
-                test_loss, correct, len(test_loader.dataset), 100.0 * correct / len(test_loader.dataset)
-            )
+            f"\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)}"
+            f" ({100.0 * correct / len(test_loader.dataset):.0f}%)\n"
         )
 
         if hparams.dry_run:

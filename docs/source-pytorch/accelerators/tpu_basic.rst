@@ -8,13 +8,10 @@ TPU training (Basic)
 
 ----
 
-.. raw:: html
-
-    <video width="50%" max-width="400px" controls
-    poster="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/pl_docs/trainer_flags/yt_thumbs/thumb_tpus.png"
-    src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/pl_docs/trainer_flags/tpu_cores.mp4"></video>
-
-|
+.. video:: https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/pl_docs/trainer_flags/tpu_cores.mp4
+    :poster: https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/pl_docs/trainer_flags/yt_thumbs/thumb_tpus.png
+    :width: 400
+    :muted:
 
 Lightning supports running on TPUs. At this moment, TPUs are available
 on Google Cloud (GCP), Google Colab and Kaggle Environments. For more information on TPUs
@@ -111,7 +108,7 @@ There are cases in which training on TPUs is slower when compared with GPUs, for
 - XLA Graph compilation during the initial steps `Reference <https://github.com/pytorch/xla/issues/2383#issuecomment-666519998>`_
 - Some tensor ops are not fully supported on TPU, or not supported at all. These operations will be performed on CPU (context switch).
 
-The official PyTorch XLA `performance guide <https://github.com/pytorch/xla/blob/master/TROUBLESHOOTING.md#known-performance-caveats>`_
+The official PyTorch XLA `performance guide <https://github.com/pytorch/xla/blob/v2.5.0/TROUBLESHOOTING.md#known-performance-caveats>`_
 has more detailed information on how PyTorch code can be optimized for TPU. In particular, the
-`metrics report <https://github.com/pytorch/xla/blob/master/TROUBLESHOOTING.md#get-a-metrics-report>`_ allows
+`metrics report <https://github.com/pytorch/xla/blob/v2.5.0/TROUBLESHOOTING.md#get-a-metrics-report>`_ allows
 one to identify operations that lead to context switching.

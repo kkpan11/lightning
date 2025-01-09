@@ -22,11 +22,11 @@ from torch import Tensor
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.demos.boring_classes import BoringModel
-from lightning.pytorch.plugins import MixedPrecisionPlugin
+from lightning.pytorch.plugins import MixedPrecision
 from tests_pytorch.helpers.runif import RunIf
 
 
-class MyAMP(MixedPrecisionPlugin):
+class MyAMP(MixedPrecision):
     pass
 
 
@@ -48,17 +48,20 @@ class MyAMP(MixedPrecisionPlugin):
 @pytest.mark.parametrize(
     ("custom_plugin", "plugin_cls"),
     [
-        (False, MixedPrecisionPlugin),
+        (False, MixedPrecision),
         (True, MyAMP),
     ],
 )
 def test_amp_ddp(cuda_count_2, strategy, devices, custom_plugin, plugin_cls):
     plugin = None
+    precision = None
     if custom_plugin:
         plugin = plugin_cls("16-mixed", "cpu")
+    else:
+        precision = "16-mixed"
     trainer = Trainer(
         fast_dev_run=True,
-        precision="16-mixed",
+        precision=precision,
         accelerator="gpu",
         devices=devices,
         strategy=strategy,
@@ -127,12 +130,12 @@ class TestPrecisionModel(BoringModel):
 
 @RunIf(min_cuda_gpus=2)
 @pytest.mark.parametrize("accum", [1, 2])
-def test_amp_gradient_unscale(tmpdir, accum: int):
+def test_amp_gradient_unscale(tmp_path, accum: int):
     model = TestPrecisionModel()
 
     trainer = Trainer(
         max_epochs=2,
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=2,
         limit_val_batches=0,
         strategy="ddp_spawn",
@@ -150,7 +153,7 @@ def test_amp_gradient_unscale(tmpdir, accum: int):
 
 
 @RunIf(min_cuda_gpus=1)
-def test_amp_skip_optimizer(tmpdir):
+def test_amp_skip_optimizer(tmp_path):
     """Test that optimizers can be skipped when using amp."""
 
     class CustomBoringModel(BoringModel):
@@ -166,7 +169,7 @@ def test_amp_skip_optimizer(tmpdir):
             return x
 
         def training_step(self, batch, batch_idx):
-            opt1, opt2 = self.optimizers()
+            _, opt2 = self.optimizers()
             output = self(batch)
             loss = self.loss(output)
             opt2.zero_grad()
@@ -180,42 +183,39 @@ def test_amp_skip_optimizer(tmpdir):
                 torch.optim.SGD(self.layer2.parameters(), lr=0.1),
             ]
 
-    trainer = Trainer(default_root_dir=tmpdir, accelerator="gpu", devices=1, fast_dev_run=1, precision="16-mixed")
+    trainer = Trainer(default_root_dir=tmp_path, accelerator="gpu", devices=1, fast_dev_run=1, precision="16-mixed")
     model = CustomBoringModel()
     trainer.fit(model)
 
 
 def test_cpu_amp_precision_context_manager():
     """Test to ensure that the context manager correctly is set to CPU + bfloat16."""
-    plugin = MixedPrecisionPlugin("bf16-mixed", "cpu")
+    plugin = MixedPrecision("bf16-mixed", "cpu")
     assert plugin.device == "cpu"
     assert plugin.scaler is None
     context_manager = plugin.autocast_context_manager()
     assert isinstance(context_manager, torch.autocast)
-    # check with str due to a bug upstream: https://github.com/pytorch/pytorch/issues/65786
-    assert str(context_manager.fast_dtype) == str(torch.bfloat16)
+    assert context_manager.fast_dtype == torch.bfloat16
 
 
 def test_amp_precision_plugin_parameter_validation():
-    MixedPrecisionPlugin("16-mixed", "cpu")  # should not raise exception
-    MixedPrecisionPlugin("bf16-mixed", "cpu")
+    MixedPrecision("16-mixed", "cpu")  # should not raise exception
+    MixedPrecision("bf16-mixed", "cpu")
 
     with pytest.raises(
         ValueError,
-        match=re.escape("Passed `MixedPrecisionPlugin(precision='16')`. Precision must be '16-mixed' or 'bf16-mixed'"),
+        match=re.escape("Passed `MixedPrecision(precision='16')`. Precision must be '16-mixed' or 'bf16-mixed'"),
     ):
-        MixedPrecisionPlugin("16", "cpu")
+        MixedPrecision("16", "cpu")
 
     with pytest.raises(
         ValueError,
-        match=re.escape("Passed `MixedPrecisionPlugin(precision=16)`. Precision must be '16-mixed' or 'bf16-mixed'"),
+        match=re.escape("Passed `MixedPrecision(precision=16)`. Precision must be '16-mixed' or 'bf16-mixed'"),
     ):
-        MixedPrecisionPlugin(16, "cpu")
+        MixedPrecision(16, "cpu")
 
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "Passed `MixedPrecisionPlugin(precision='bf16')`. Precision must be '16-mixed' or 'bf16-mixed'"
-        ),
+        match=re.escape("Passed `MixedPrecision(precision='bf16')`. Precision must be '16-mixed' or 'bf16-mixed'"),
     ):
-        MixedPrecisionPlugin("bf16", "cpu")
+        MixedPrecision("bf16", "cpu")

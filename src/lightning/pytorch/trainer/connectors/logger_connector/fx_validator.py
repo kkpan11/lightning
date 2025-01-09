@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 from typing_extensions import TypedDict
 
@@ -20,8 +20,8 @@ from lightning.pytorch.utilities.exceptions import MisconfigurationException
 
 class _FxValidator:
     class _LogOptions(TypedDict):
-        allowed_on_step: Union[Tuple[bool], Tuple[bool, bool]]
-        allowed_on_epoch: Union[Tuple[bool], Tuple[bool, bool]]
+        allowed_on_step: Union[tuple[bool], tuple[bool, bool]]
+        allowed_on_epoch: Union[tuple[bool], tuple[bool, bool]]
         default_on_step: bool
         default_on_epoch: bool
 
@@ -124,6 +124,7 @@ class _FxValidator:
         "setup": None,
         "teardown": None,
         "configure_sharded_model": None,
+        "configure_model": None,
         "training_step": _LogOptions(
             allowed_on_step=(False, True), allowed_on_epoch=(False, True), default_on_step=True, default_on_epoch=False
         ),
@@ -140,6 +141,7 @@ class _FxValidator:
         "test_dataloader": None,
         "prepare_data": None,
         "configure_callbacks": None,
+        "on_validation_model_zero_grad": None,
         "on_validation_model_eval": None,
         "on_test_model_eval": None,
         "on_validation_model_train": None,
@@ -164,7 +166,7 @@ class _FxValidator:
     @classmethod
     def get_default_logging_levels(
         cls, fx_name: str, on_step: Optional[bool], on_epoch: Optional[bool]
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Return default logging levels for given hook."""
         fx_config = cls.functions[fx_name]
         assert fx_config is not None
@@ -189,7 +191,7 @@ class _FxValidator:
     @classmethod
     def check_logging_and_get_default_levels(
         cls, fx_name: str, on_step: Optional[bool], on_epoch: Optional[bool]
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Check if the given hook name is allowed to log and return logging levels."""
         cls.check_logging(fx_name)
         on_step, on_epoch = cls.get_default_logging_levels(fx_name, on_step, on_epoch)

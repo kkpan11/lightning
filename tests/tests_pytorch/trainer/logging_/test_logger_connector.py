@@ -20,9 +20,8 @@ import pytest
 import torch
 from lightning_utilities.core.imports import compare_version
 from torch.utils.data import DataLoader
-from torchmetrics import Accuracy
+from torchmetrics import Accuracy, MeanAbsoluteError, MeanSquaredError, MetricCollection
 from torchmetrics import AveragePrecision as AvgPre
-from torchmetrics import MeanAbsoluteError, MeanSquaredError, MetricCollection
 
 from lightning.pytorch import LightningModule
 from lightning.pytorch.callbacks.callback import Callback
@@ -34,6 +33,7 @@ from lightning.pytorch.trainer.connectors.logger_connector.result import _Result
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from lightning.pytorch.utilities.imports import _TORCHMETRICS_GREATER_EQUAL_0_9_1
 from lightning.pytorch.utilities.imports import _TORCHMETRICS_GREATER_EQUAL_0_11 as _TM_GE_0_11
+from tests_pytorch.helpers.runif import RunIf
 from tests_pytorch.models.test_hooks import get_members
 
 
@@ -171,6 +171,7 @@ class HookedModel(BoringModel):
         super().__init__()
         pl_module_hooks = get_members(LightningModule)
         pl_module_hooks.difference_update({"log", "log_dict"})
+        pl_module_hooks.discard("configure_sharded_model")
         # remove `nn.Module` hooks
         module_hooks = get_members(torch.nn.Module)
         pl_module_hooks.difference_update(module_hooks)
@@ -190,12 +191,12 @@ class HookedModel(BoringModel):
             setattr(self, h, partial(call, h, attr))
 
 
-def test_fx_validator_integration(tmpdir):
+def test_fx_validator_integration(tmp_path):
     """Tries to log inside all `LightningModule` and `Callback` hooks to check any expected errors."""
     not_supported = {
         None: "`self.trainer` reference is not registered",
         "setup": "You can't",
-        "configure_sharded_model": "You can't",
+        "configure_model": "You can't",
         "configure_optimizers": "You can't",
         "on_fit_start": "You can't",
         "train_dataloader": "You can't",
@@ -211,6 +212,7 @@ def test_fx_validator_integration(tmpdir):
         "on_sanity_check_end": "You can't",
         "prepare_data": "You can't",
         "configure_callbacks": "You can't",
+        "on_validation_model_zero_grad": "You can't",
         "on_validation_model_eval": "You can't",
         "on_validation_model_train": "You can't",
         "lr_scheduler_step": "You can't",
@@ -225,7 +227,7 @@ def test_fx_validator_integration(tmpdir):
 
     callback = HookedCallback(not_supported)
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         max_epochs=2,
         limit_train_batches=1,
         limit_val_batches=1,
@@ -235,37 +237,33 @@ def test_fx_validator_integration(tmpdir):
     )
     trainer.fit(model)
 
-    not_supported.update(
-        {
-            # `lightning_module` ref is now present from the `fit` call
-            "test_dataloader": "You can't",
-            "on_test_model_eval": "You can't",
-            "on_test_model_train": "You can't",
-            "on_test_end": "You can't",
-        }
-    )
+    not_supported.update({
+        # `lightning_module` ref is now present from the `fit` call
+        "test_dataloader": "You can't",
+        "on_test_model_eval": "You can't",
+        "on_test_model_train": "You can't",
+        "on_test_end": "You can't",
+    })
     trainer.test(model, verbose=False)
 
     not_supported.update({k: "result collection is not registered yet" for k in not_supported})
-    not_supported.update(
-        {
-            "predict_dataloader": "result collection is not registered yet",
-            "on_predict_model_eval": "result collection is not registered yet",
-            "on_predict_start": "result collection is not registered yet",
-            "on_predict_epoch_start": "result collection is not registered yet",
-            "on_predict_batch_start": "result collection is not registered yet",
-            "predict_step": "result collection is not registered yet",
-            "on_predict_batch_end": "result collection is not registered yet",
-            "on_predict_epoch_end": "result collection is not registered yet",
-            "on_predict_end": "result collection is not registered yet",
-        }
-    )
+    not_supported.update({
+        "predict_dataloader": "result collection is not registered yet",
+        "on_predict_model_eval": "result collection is not registered yet",
+        "on_predict_start": "result collection is not registered yet",
+        "on_predict_epoch_start": "result collection is not registered yet",
+        "on_predict_batch_start": "result collection is not registered yet",
+        "predict_step": "result collection is not registered yet",
+        "on_predict_batch_end": "result collection is not registered yet",
+        "on_predict_epoch_end": "result collection is not registered yet",
+        "on_predict_end": "result collection is not registered yet",
+    })
     trainer.predict(model)
 
 
 @pytest.mark.parametrize("add_dataloader_idx", [False, True])
-def test_auto_add_dataloader_idx(tmpdir, add_dataloader_idx):
-    """test that auto_add_dataloader_idx argument works."""
+def test_auto_add_dataloader_idx(tmp_path, add_dataloader_idx):
+    """Test that auto_add_dataloader_idx argument works."""
 
     class TestModel(BoringModel):
         def val_dataloader(self):
@@ -281,7 +279,7 @@ def test_auto_add_dataloader_idx(tmpdir, add_dataloader_idx):
 
     model = TestModel()
 
-    trainer = Trainer(default_root_dir=tmpdir, fast_dev_run=2)
+    trainer = Trainer(default_root_dir=tmp_path, fast_dev_run=2)
     trainer.fit(model)
     logged = trainer.logged_metrics
 
@@ -294,7 +292,7 @@ def test_auto_add_dataloader_idx(tmpdir, add_dataloader_idx):
         assert "val_loss_custom_naming_1" in logged
 
 
-def test_metrics_reset(tmpdir):
+def test_metrics_reset(tmp_path):
     """Tests that metrics are reset correctly after the end of the train/val/test epoch."""
 
     class TestModel(LightningModule):
@@ -310,7 +308,7 @@ def test_metrics_reset(tmpdir):
             return acc, ap
 
         def setup(self, stage):
-            fn = stage
+            fn = stage.value
             if fn == "fit":
                 for stage in ("train", "validate"):
                     acc, ap = self._create_metrics()
@@ -318,7 +316,7 @@ def test_metrics_reset(tmpdir):
                     self.add_module(f"ap_{fn}_{stage}", ap)
             else:
                 acc, ap = self._create_metrics()
-                stage = self.trainer.state.stage
+                stage = self.trainer.state.stage.value
                 self.add_module(f"acc_{fn}_{stage}", acc)
                 self.add_module(f"ap_{fn}_{stage}", ap)
 
@@ -326,7 +324,7 @@ def test_metrics_reset(tmpdir):
             return self.layer(x)
 
         def _step(self, batch):
-            fn, stage = self.trainer.state.fn, self.trainer.state.stage
+            fn, stage = self.trainer.state.fn.value, self.trainer.state.stage.value
 
             logits = self(batch)
             loss = logits.sum()
@@ -382,7 +380,7 @@ def test_metrics_reset(tmpdir):
 
     model = TestModel()
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=2,
         limit_val_batches=2,
         limit_test_batches=2,
@@ -407,7 +405,7 @@ def test_metrics_reset(tmpdir):
     compare_version("torchmetrics", operator.lt, "0.8.0"), reason="torchmetrics>=0.8.0 required for compute groups"
 )
 @pytest.mark.parametrize("compute_groups", [True, False])
-def test_metriccollection_compute_groups(tmpdir, compute_groups):
+def test_metriccollection_compute_groups(tmp_path, compute_groups):
     def assertion_calls(keep_base: bool, copy_state: bool):
         if _TORCHMETRICS_GREATER_EQUAL_0_9_1:
             assert copy_state != compute_groups
@@ -462,7 +460,7 @@ def test_metriccollection_compute_groups(tmpdir, compute_groups):
             self.metrics.wrapped_assertion_calls.reset_mock()
 
     trainer = Trainer(
-        default_root_dir=tmpdir,
+        default_root_dir=tmp_path,
         limit_train_batches=2,
         limit_val_batches=0,
         max_epochs=1,
@@ -572,7 +570,7 @@ def test_result_collection_on_tensor_with_mean_reduction():
 
 
 @pytest.mark.parametrize("logger", [False, True])
-def test_logged_metrics_has_logged_epoch_value(tmpdir, logger):
+def test_logged_metrics_has_logged_epoch_value(tmp_path, logger):
     class TestModel(BoringModel):
         def training_step(self, batch, batch_idx):
             self.log("epoch", -batch_idx, logger=True)
@@ -580,14 +578,14 @@ def test_logged_metrics_has_logged_epoch_value(tmpdir, logger):
 
     model = TestModel()
     trainer_kwargs = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "limit_train_batches": 2,
         "limit_val_batches": 0,
         "max_epochs": 1,
         "logger": False,
     }
     if logger:
-        trainer_kwargs["logger"] = CSVLogger(tmpdir)
+        trainer_kwargs["logger"] = CSVLogger(tmp_path)
     trainer = Trainer(**trainer_kwargs)
     if not logger:
         with pytest.warns(match=r"log\('epoch', ..., logger=True\)` but have no logger"):
@@ -642,3 +640,23 @@ def test_result_collection_no_batch_size_extraction():
     assert results["training_step.epoch_log_val"].value == log_val * batch_size
     assert results["training_step.epoch_log_val"].cumulated_batch_size == batch_size
     assert results["training_step.epoch_sum_log_val"].value == log_val
+
+
+@RunIf(min_cuda_gpus=1)
+def test_result_collection_changes_device():
+    """Test that the keys in the ResultCollection are moved to the device together with the collection."""
+    results = _ResultCollection(training=True)
+    fx, name = "training_step", "step_log_val"
+    log_val = torch.tensor(7.0, device="cuda:0")
+
+    # same device as the original tensor
+    results.log(fx, name, log_val, on_step=True, on_epoch=False, reduce_fx="mean")
+    assert results[f"{fx}.{name}"].cumulated_batch_size.device == log_val.device
+
+    # moved to cpu
+    results.cpu()
+    assert results[f"{fx}.{name}"].cumulated_batch_size.device == torch.device("cpu")
+
+    # same device as the new tensor
+    results.log(fx, name, log_val, on_step=True, on_epoch=False, reduce_fx="mean")
+    assert results[f"{fx}.{name}"].cumulated_batch_size.device == log_val.device

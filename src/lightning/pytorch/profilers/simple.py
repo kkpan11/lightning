@@ -12,28 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Profiler to check if there are any bottlenecks in your code."""
+
 import logging
 import os
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
+from typing_extensions import override
 
 from lightning.pytorch.profilers.profiler import Profiler
 
 log = logging.getLogger(__name__)
 
-_TABLE_ROW_EXTENDED = Tuple[str, float, int, float, float]
-_TABLE_DATA_EXTENDED = List[_TABLE_ROW_EXTENDED]
-_TABLE_ROW = Tuple[str, float, float]
-_TABLE_DATA = List[_TABLE_ROW]
+_TABLE_ROW_EXTENDED = tuple[str, float, int, float, float]
+_TABLE_DATA_EXTENDED = list[_TABLE_ROW_EXTENDED]
+_TABLE_ROW = tuple[str, float, float]
+_TABLE_DATA = list[_TABLE_ROW]
 
 
 class SimpleProfiler(Profiler):
-    """This profiler simply records the duration of actions (in seconds) and reports the mean duration of each
-    action and the total time spent over the entire training run."""
+    """This profiler simply records the duration of actions (in seconds) and reports the mean duration of each action
+    and the total time spent over the entire training run."""
 
     def __init__(
         self,
@@ -59,16 +61,18 @@ class SimpleProfiler(Profiler):
                 if you attempt to stop recording an action which was never started.
         """
         super().__init__(dirpath=dirpath, filename=filename)
-        self.current_actions: Dict[str, float] = {}
-        self.recorded_durations: Dict = defaultdict(list)
+        self.current_actions: dict[str, float] = {}
+        self.recorded_durations: dict = defaultdict(list)
         self.extended = extended
         self.start_time = time.monotonic()
 
+    @override
     def start(self, action_name: str) -> None:
         if action_name in self.current_actions:
             raise ValueError(f"Attempted to start {action_name} which has already started.")
         self.current_actions[action_name] = time.monotonic()
 
+    @override
     def stop(self, action_name: str) -> None:
         end_time = time.monotonic()
         if action_name not in self.current_actions:
@@ -77,7 +81,7 @@ class SimpleProfiler(Profiler):
         duration = end_time - start_time
         self.recorded_durations[action_name].append(duration)
 
-    def _make_report_extended(self) -> Tuple[_TABLE_DATA_EXTENDED, float, float]:
+    def _make_report_extended(self) -> tuple[_TABLE_DATA_EXTENDED, float, float]:
         total_duration = time.monotonic() - self.start_time
         report = []
 
@@ -104,6 +108,7 @@ class SimpleProfiler(Profiler):
         report.sort(key=lambda x: x[1], reverse=True)
         return report
 
+    @override
     def summary(self) -> str:
         sep = os.linesep
         output_string = ""

@@ -11,11 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-r"""Timer ^^^^^"""
+r"""
+Timer
+^^^^^
+"""
+
 import logging
+import re
 import time
 from datetime import timedelta
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
+
+from typing_extensions import override
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks.callback import Callback
@@ -33,8 +40,8 @@ class Interval(LightningEnum):
 
 
 class Timer(Callback):
-    """The Timer callback tracks the time spent in the training, validation, and test loops and interrupts the
-    Trainer if the given time limit for the training loop is reached.
+    """The Timer callback tracks the time spent in the training, validation, and test loops and interrupts the Trainer
+    if the given time limit for the training loop is reached.
 
     Args:
         duration: A string in the format DD:HH:MM:SS (days, hours, minutes seconds), or a :class:`datetime.timedelta`,
@@ -44,6 +51,8 @@ class Timer(Callback):
         verbose: Set this to ``False`` to suppress logging messages.
 
     Raises:
+        MisconfigurationException:
+            If ``duration`` is not in the expected format.
         MisconfigurationException:
             If ``interval`` is not one of the supported choices.
 
@@ -69,20 +78,30 @@ class Timer(Callback):
         timer.time_elapsed("train")
         timer.start_time("validate")
         timer.end_time("test")
+
     """
 
     def __init__(
         self,
-        duration: Optional[Union[str, timedelta, Dict[str, int]]] = None,
+        duration: Optional[Union[str, timedelta, dict[str, int]]] = None,
         interval: str = Interval.step,
         verbose: bool = True,
     ) -> None:
         super().__init__()
         if isinstance(duration, str):
-            dhms = duration.strip().split(":")
-            dhms = [int(i) for i in dhms]
-            duration = timedelta(days=dhms[0], hours=dhms[1], minutes=dhms[2], seconds=dhms[3])
-        if isinstance(duration, dict):
+            duration_match = re.fullmatch(r"(\d+):(\d\d):(\d\d):(\d\d)", duration.strip())
+            if not duration_match:
+                raise MisconfigurationException(
+                    f"`Timer(duration={duration!r})` is not a valid duration. "
+                    "Expected a string in the format DD:HH:MM:SS."
+                )
+            duration = timedelta(
+                days=int(duration_match.group(1)),
+                hours=int(duration_match.group(2)),
+                minutes=int(duration_match.group(3)),
+                seconds=int(duration_match.group(4)),
+            )
+        elif isinstance(duration, dict):
             duration = timedelta(**duration)
         if interval not in set(Interval):
             raise MisconfigurationException(
@@ -92,8 +111,8 @@ class Timer(Callback):
         self._duration = duration.total_seconds() if duration is not None else None
         self._interval = interval
         self._verbose = verbose
-        self._start_time: Dict[RunningStage, Optional[float]] = {stage: None for stage in RunningStage}
-        self._end_time: Dict[RunningStage, Optional[float]] = {stage: None for stage in RunningStage}
+        self._start_time: dict[RunningStage, Optional[float]] = {stage: None for stage in RunningStage}
+        self._end_time: dict[RunningStage, Optional[float]] = {stage: None for stage in RunningStage}
         self._offset = 0
 
     def start_time(self, stage: str = RunningStage.TRAINING) -> Optional[float]:
@@ -123,24 +142,31 @@ class Timer(Callback):
             return self._duration - self.time_elapsed(stage)
         return None
 
+    @override
     def on_train_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._start_time[RunningStage.TRAINING] = time.monotonic()
 
+    @override
     def on_train_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._end_time[RunningStage.TRAINING] = time.monotonic()
 
+    @override
     def on_validation_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._start_time[RunningStage.VALIDATING] = time.monotonic()
 
+    @override
     def on_validation_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._end_time[RunningStage.VALIDATING] = time.monotonic()
 
+    @override
     def on_test_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._start_time[RunningStage.TESTING] = time.monotonic()
 
+    @override
     def on_test_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         self._end_time[RunningStage.TESTING] = time.monotonic()
 
+    @override
     def on_fit_start(self, trainer: "pl.Trainer", *args: Any, **kwargs: Any) -> None:
         # this checks the time after the state is reloaded, regardless of the interval.
         # this is necessary in case we load a state whose timer is already depleted
@@ -148,20 +174,24 @@ class Timer(Callback):
             return
         self._check_time_remaining(trainer)
 
+    @override
     def on_train_batch_end(self, trainer: "pl.Trainer", *args: Any, **kwargs: Any) -> None:
         if self._interval != Interval.step or self._duration is None:
             return
         self._check_time_remaining(trainer)
 
+    @override
     def on_train_epoch_end(self, trainer: "pl.Trainer", *args: Any, **kwargs: Any) -> None:
         if self._interval != Interval.epoch or self._duration is None:
             return
         self._check_time_remaining(trainer)
 
-    def state_dict(self) -> Dict[str, Any]:
+    @override
+    def state_dict(self) -> dict[str, Any]:
         return {"time_elapsed": {stage.value: self.time_elapsed(stage) for stage in RunningStage}}
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         time_elapsed = state_dict.get("time_elapsed", {})
         self._offset = time_elapsed.get(RunningStage.TRAINING.value, 0)
 

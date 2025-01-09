@@ -22,7 +22,7 @@ import torch
 import tests_pytorch.helpers.pipelines as tpipes
 from lightning.fabric.plugins.environments import TorchElasticEnvironment
 from lightning.fabric.utilities.device_parser import _parse_gpu_ids
-from lightning.pytorch import Trainer
+from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.accelerators import CPUAccelerator, CUDAAccelerator
 from lightning.pytorch.demos.boring_classes import BoringModel
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
@@ -34,10 +34,11 @@ PRETEND_N_OF_GPUS = 16
 
 
 @RunIf(min_cuda_gpus=2, sklearn=True)
-def test_multi_gpu_none_backend(tmpdir):
+def test_multi_gpu_none_backend(tmp_path):
     """Make sure when using multiple GPUs the user can't use `accelerator = None`."""
+    seed_everything(42)
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "enable_progress_bar": False,
         "max_epochs": 1,
         "limit_train_batches": 0.2,
@@ -54,9 +55,10 @@ def test_multi_gpu_none_backend(tmpdir):
 
 @RunIf(min_cuda_gpus=2)
 @pytest.mark.parametrize("devices", [1, [0], [1]])
-def test_single_gpu_model(tmpdir, devices):
+def test_single_gpu_model(tmp_path, devices):
+    seed_everything(42)
     trainer_options = {
-        "default_root_dir": tmpdir,
+        "default_root_dir": tmp_path,
         "enable_progress_bar": False,
         "max_epochs": 1,
         "limit_train_batches": 0.1,
@@ -74,7 +76,6 @@ def test_single_gpu_model(tmpdir, devices):
     "devices",
     [
         1,
-        3,
         3,
         [1, 2],
         [0, 1],
@@ -208,3 +209,23 @@ def test_non_blocking():
     with patch.object(batch, "to", wraps=batch.to) as mocked:
         batch = trainer.strategy.batch_to_device(batch, torch.device("cuda:0"))
         mocked.assert_called_with(torch.device("cuda", 0))
+
+
+@RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    ("strategy", "precision", "expected_dtype"),
+    [
+        ("auto", "16-mixed", torch.float32),
+        ("auto", "16-true", torch.float16),
+        pytest.param("deepspeed", "bf16-true", torch.bfloat16, marks=RunIf(deepspeed=True, bf16_cuda=True)),
+    ],
+)
+def test_input_tensors_cast_before_transfer_to_device(strategy, precision, expected_dtype):
+    class CustomBoringModel(BoringModel):
+        def transfer_batch_to_device(self, batch, *args, **kwargs):
+            assert batch.dtype == expected_dtype
+            return super().transfer_batch_to_device(batch, *args, **kwargs)
+
+    model = CustomBoringModel()
+    trainer = Trainer(strategy=strategy, devices=1, precision=precision, barebones=True, max_steps=2)
+    trainer.fit(model)

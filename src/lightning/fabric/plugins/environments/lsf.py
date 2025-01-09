@@ -14,7 +14,8 @@
 import logging
 import os
 import socket
-from typing import Dict, List
+
+from typing_extensions import override
 
 from lightning.fabric.plugins.environments.cluster_environment import ClusterEnvironment
 from lightning.fabric.utilities.cloud_io import get_filesystem
@@ -44,6 +45,7 @@ class LSFEnvironment(ClusterEnvironment):
 
     ``JSM_NAMESPACE_RANK``
       The global rank for the task. This environment variable is set by ``jsrun``
+
     """
 
     def __init__(self) -> None:
@@ -61,27 +63,32 @@ class LSFEnvironment(ClusterEnvironment):
         log.debug(f"MASTER_PORT: {os.environ['MASTER_PORT']}")
 
     @property
+    @override
     def creates_processes_externally(self) -> bool:
         """LSF creates subprocesses, i.e., PyTorch Lightning does not need to spawn them."""
         return True
 
     @property
+    @override
     def main_address(self) -> str:
         """The main address is read from an OpenMPI host rank file in the environment variable
         ``LSB_DJOB_RANKFILE``."""
         return self._main_address
 
     @property
+    @override
     def main_port(self) -> int:
         """The main port is calculated from the LSF job ID."""
         return self._main_port
 
     @staticmethod
+    @override
     def detect() -> bool:
         """Returns ``True`` if the current process was launched using the ``jsrun`` command."""
         required_env_vars = {"LSB_JOBID", "LSB_DJOB_RANKFILE", "JSM_NAMESPACE_LOCAL_RANK", "JSM_NAMESPACE_SIZE"}
         return required_env_vars.issubset(os.environ.keys())
 
+    @override
     def world_size(self) -> int:
         """The world size is read from the environment variable ``JSM_NAMESPACE_SIZE``."""
         world_size = os.environ.get("JSM_NAMESPACE_SIZE")
@@ -92,9 +99,11 @@ class LSFEnvironment(ClusterEnvironment):
             )
         return int(world_size)
 
+    @override
     def set_world_size(self, size: int) -> None:
         log.debug("LSFEnvironment.set_world_size was called, but setting world size is not allowed. Ignored.")
 
+    @override
     def global_rank(self) -> int:
         """The world size is read from the environment variable ``JSM_NAMESPACE_RANK``."""
         global_rank = os.environ.get("JSM_NAMESPACE_RANK")
@@ -105,9 +114,11 @@ class LSFEnvironment(ClusterEnvironment):
             )
         return int(global_rank)
 
+    @override
     def set_global_rank(self, rank: int) -> None:
         log.debug("LSFEnvironment.set_global_rank was called, but setting global rank is not allowed. Ignored.")
 
+    @override
     def local_rank(self) -> int:
         """The local rank is read from the environment variable `JSM_NAMESPACE_LOCAL_RANK`."""
         local_rank = os.environ.get("JSM_NAMESPACE_LOCAL_RANK")
@@ -118,9 +129,10 @@ class LSFEnvironment(ClusterEnvironment):
             )
         return int(local_rank)
 
+    @override
     def node_rank(self) -> int:
-        """The node rank is determined by the position of the current hostname in the OpenMPI host rank file stored
-        in ``LSB_DJOB_RANKFILE``."""
+        """The node rank is determined by the position of the current hostname in the OpenMPI host rank file stored in
+        ``LSB_DJOB_RANKFILE``."""
         return self._node_rank
 
     def _get_node_rank(self) -> int:
@@ -128,21 +140,23 @@ class LSFEnvironment(ClusterEnvironment):
 
         The node rank is determined by the position of the current node in the list of hosts used in the job. This is
         calculated by reading all hosts from ``LSB_DJOB_RANKFILE`` and finding this node's hostname in the list.
+
         """
         hosts = self._read_hosts()
-        count: Dict[str, int] = {}
+        count: dict[str, int] = {}
         for host in hosts:
             if host not in count:
                 count[host] = len(count)
         return count[socket.gethostname()]
 
     @staticmethod
-    def _read_hosts() -> List[str]:
+    def _read_hosts() -> list[str]:
         """Read compute hosts that are a part of the compute job.
 
         LSF uses the Job Step Manager (JSM) to manage job steps. Job steps are executed by the JSM from "launch" nodes.
         Each job is assigned a launch node. This launch node will be the first node in the list contained in
         ``LSB_DJOB_RANKFILE``.
+
         """
         var = "LSB_DJOB_RANKFILE"
         rankfile = os.environ.get(var)
@@ -161,6 +175,7 @@ class LSFEnvironment(ClusterEnvironment):
         """A helper for getting the main address.
 
         The main address is assigned to the first node in the list of nodes used for the job.
+
         """
         hosts = self._read_hosts()
         return hosts[0]
@@ -170,6 +185,7 @@ class LSFEnvironment(ClusterEnvironment):
         """A helper function for accessing the main port.
 
         Uses the LSF job ID so all ranks can compute the main port.
+
         """
         # check for user-specified main port
         if "MASTER_PORT" in os.environ:

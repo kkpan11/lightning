@@ -11,11 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib
-from inspect import getmembers, isclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
-from lightning.fabric.utilities.registry import _is_register_method_overridden
+from typing_extensions import override
 
 
 class _StrategyRegistry(dict):
@@ -40,6 +38,7 @@ class _StrategyRegistry(dict):
         or
 
         StrategyRegistry.register("lightning", LightningStrategy, description="Super fast", a=1, b=True)
+
     """
 
     def register(
@@ -58,6 +57,7 @@ class _StrategyRegistry(dict):
             description : strategy description
             override : overrides the registered strategy, if True
             init_params: parameters to initialize the strategy
+
         """
         if not (name is None or isinstance(name, str)):
             raise TypeError(f"`name` must be a str, found {name}")
@@ -65,7 +65,7 @@ class _StrategyRegistry(dict):
         if name in self and not override:
             raise ValueError(f"'{name}' is already present in the registry. HINT: Use `override=True`.")
 
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
         data["description"] = description if description is not None else ""
 
         data["init_params"] = init_params
@@ -81,11 +81,13 @@ class _StrategyRegistry(dict):
 
         return do_register
 
+    @override
     def get(self, name: str, default: Optional[Any] = None) -> Any:
         """Calls the registered strategy with the required parameters and returns the strategy object.
 
         Args:
             name (str): the name that identifies a strategy, e.g. "deepspeed_stage_3"
+
         """
         if name in self:
             data = self[name]
@@ -102,18 +104,9 @@ class _StrategyRegistry(dict):
         """Removes the registered strategy by name."""
         self.pop(name)
 
-    def available_strategies(self) -> List:
+    def available_strategies(self) -> list:
         """Returns a list of registered strategies."""
         return list(self.keys())
 
     def __str__(self) -> str:
         return "Registered Strategies: {}".format(", ".join(self.keys()))
-
-
-def _call_register_strategies(registry: _StrategyRegistry, base_module: str) -> None:
-    module = importlib.import_module(base_module)
-    from lightning.fabric.strategies.strategy import Strategy
-
-    for _, mod in getmembers(module, isclass):
-        if issubclass(mod, Strategy) and _is_register_method_overridden(mod, Strategy, "register_strategies"):
-            mod.register_strategies(registry)

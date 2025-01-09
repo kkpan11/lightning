@@ -17,12 +17,14 @@ import copy
 import inspect
 import pickle
 import types
+from collections.abc import MutableMapping, Sequence
 from dataclasses import fields, is_dataclass
-from typing import Any, Dict, List, Literal, MutableMapping, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Literal, Optional, Union
 
 from torch import nn
 
 import lightning.pytorch as pl
+from lightning.fabric.utilities.data import AttributeDict as _AttributeDict
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
 
@@ -40,11 +42,14 @@ def clean_namespace(hparams: MutableMapping) -> None:
     del_attrs = [k for k, v in hparams.items() if not is_picklable(v)]
 
     for k in del_attrs:
-        rank_zero_warn(f"attribute '{k}' removed from hparams because it cannot be pickled")
+        rank_zero_warn(
+            f"Attribute '{k}' removed from hparams because it cannot be pickled. You can suppress this warning by"
+            f" setting `self.save_hyperparameters(ignore=['{k}'])`.",
+        )
         del hparams[k]
 
 
-def parse_class_init_keys(cls: Type) -> Tuple[str, Optional[str], Optional[str]]:
+def parse_class_init_keys(cls: type) -> tuple[str, Optional[str], Optional[str]]:
     """Parse key words for standard ``self``, ``*args`` and ``**kwargs``.
 
     Examples:
@@ -54,8 +59,9 @@ def parse_class_init_keys(cls: Type) -> Tuple[str, Optional[str], Optional[str]]
         ...         pass
         >>> parse_class_init_keys(Model)
         ('self', 'my_args', 'my_kwargs')
+
     """
-    init_parameters = inspect.signature(cls.__init__).parameters
+    init_parameters = inspect.signature(cls.__init__).parameters  # type: ignore[misc]
     # docs claims the params are always ordered
     # https://docs.python.org/3/library/inspect.html#inspect.Signature.parameters
     init_params = list(init_parameters.values())
@@ -63,7 +69,7 @@ def parse_class_init_keys(cls: Type) -> Tuple[str, Optional[str], Optional[str]]
     n_self = init_params[0].name
 
     def _get_first_if_any(
-        params: List[inspect.Parameter],
+        params: list[inspect.Parameter],
         param_type: Literal[inspect._ParameterKind.VAR_POSITIONAL, inspect._ParameterKind.VAR_KEYWORD],
     ) -> Optional[str]:
         for p in params:
@@ -77,13 +83,13 @@ def parse_class_init_keys(cls: Type) -> Tuple[str, Optional[str], Optional[str]]
     return n_self, n_args, n_kwargs
 
 
-def get_init_args(frame: types.FrameType) -> Dict[str, Any]:  # pragma: no-cover
+def get_init_args(frame: types.FrameType) -> dict[str, Any]:  # pragma: no-cover
     """For backwards compatibility: #16369."""
     _, local_args = _get_init_args(frame)
     return local_args
 
 
-def _get_init_args(frame: types.FrameType) -> Tuple[Optional[Any], Dict[str, Any]]:
+def _get_init_args(frame: types.FrameType) -> tuple[Optional[Any], dict[str, Any]]:
     _, _, _, local_vars = inspect.getargvalues(frame)
     if "__class__" not in local_vars:
         return None, {}
@@ -104,10 +110,10 @@ def _get_init_args(frame: types.FrameType) -> Tuple[Optional[Any], Dict[str, Any
 
 def collect_init_args(
     frame: types.FrameType,
-    path_args: List[Dict[str, Any]],
+    path_args: list[dict[str, Any]],
     inside: bool = False,
-    classes: Tuple[Type, ...] = (),
-) -> List[Dict[str, Any]]:
+    classes: tuple[type, ...] = (),
+) -> list[dict[str, Any]]:
     """Recursively collects the arguments passed to the child constructors in the inheritance tree.
 
     Args:
@@ -120,6 +126,7 @@ def collect_init_args(
           A list of dictionaries where each dictionary contains the arguments passed to the
           constructor at that level. The last entry corresponds to the constructor call of the
           most specific class in the hierarchy.
+
     """
     _, _, _, local_vars = inspect.getargvalues(frame)
     # frame.f_back must be of a type types.FrameType for get_init_args/collect_init_args due to mypy
@@ -137,7 +144,11 @@ def collect_init_args(
 
 
 def save_hyperparameters(
-    obj: Any, *args: Any, ignore: Optional[Union[Sequence[str], str]] = None, frame: Optional[types.FrameType] = None
+    obj: Any,
+    *args: Any,
+    ignore: Optional[Union[Sequence[str], str]] = None,
+    frame: Optional[types.FrameType] = None,
+    given_hparams: Optional[dict[str, Any]] = None,
 ) -> None:
     """See :meth:`~lightning.pytorch.LightningModule.save_hyperparameters`"""
 
@@ -153,7 +164,9 @@ def save_hyperparameters(
     if not isinstance(frame, types.FrameType):
         raise AttributeError("There is no `frame` available while being required.")
 
-    if is_dataclass(obj):
+    if given_hparams is not None:
+        init_args = given_hparams
+    elif is_dataclass(obj):
         init_args = {f.name: getattr(obj, f.name) for f in fields(obj)}
     else:
         init_args = {}
@@ -202,7 +215,7 @@ def save_hyperparameters(
     obj._hparams_initial = copy.deepcopy(obj._hparams)
 
 
-class AttributeDict(Dict):
+class AttributeDict(_AttributeDict):
     """Extended dictionary accessible with dot notation.
 
     >>> ad = AttributeDict({'key1': 1, 'key2': 'abc'})
@@ -216,33 +229,18 @@ class AttributeDict(Dict):
     "key2":    abc
     "my-key":  3.14
     "new_key": 42
+
     """
 
-    def __getattr__(self, key: str) -> Optional[Any]:
-        try:
-            return self[key]
-        except KeyError as exp:
-            raise AttributeError(f'Missing attribute "{key}"') from exp
 
-    def __setattr__(self, key: str, val: Any) -> None:
-        self[key] = val
-
-    def __repr__(self) -> str:
-        if not len(self):
-            return ""
-        max_key_length = max(len(str(k)) for k in self)
-        tmp_name = "{:" + str(max_key_length + 3) + "s} {}"
-        rows = [tmp_name.format(f'"{n}":', self[n]) for n in sorted(self.keys())]
-        return "\n".join(rows)
-
-
-def _lightning_get_all_attr_holders(model: "pl.LightningModule", attribute: str) -> List[Any]:
+def _lightning_get_all_attr_holders(model: "pl.LightningModule", attribute: str) -> list[Any]:
     """Special attribute finding for Lightning.
 
     Gets all of the objects or dicts that holds attribute. Checks for attribute in model namespace, the old hparams
     namespace/dict, and the datamodule.
+
     """
-    holders: List[Any] = []
+    holders: list[Any] = []
 
     # Check if attribute in model
     if hasattr(model, attribute):
@@ -269,6 +267,7 @@ def _lightning_get_first_attr_holder(model: "pl.LightningModule", attribute: str
 
     Gets the object or dict that holds attribute, or None. Checks for attribute in model namespace, the old hparams
     namespace/dict, and the datamodule, returns the last one that has it.
+
     """
     holders = _lightning_get_all_attr_holders(model, attribute)
     if len(holders) == 0:
@@ -281,18 +280,20 @@ def lightning_hasattr(model: "pl.LightningModule", attribute: str) -> bool:
     """Special hasattr for Lightning.
 
     Checks for attribute in model namespace, the old hparams namespace/dict, and the datamodule.
+
     """
     return _lightning_get_first_attr_holder(model, attribute) is not None
 
 
 def lightning_getattr(model: "pl.LightningModule", attribute: str) -> Optional[Any]:
-    """Special getattr for Lightning. Checks for attribute in model namespace, the old hparams namespace/dict, and
-    the datamodule.
+    """Special getattr for Lightning. Checks for attribute in model namespace, the old hparams namespace/dict, and the
+    datamodule.
 
     Raises:
         AttributeError:
             If ``model`` doesn't have ``attribute`` in any of
             model namespace, the hparams namespace/dict, and the datamodule.
+
     """
     holder = _lightning_get_first_attr_holder(model, attribute)
     if holder is None:
@@ -307,13 +308,14 @@ def lightning_getattr(model: "pl.LightningModule", attribute: str) -> Optional[A
 
 
 def lightning_setattr(model: "pl.LightningModule", attribute: str, value: Any) -> None:
-    """Special setattr for Lightning. Checks for attribute in model namespace and the old hparams namespace/dict.
-    Will also set the attribute on datamodule, if it exists.
+    """Special setattr for Lightning. Checks for attribute in model namespace and the old hparams namespace/dict. Will
+    also set the attribute on datamodule, if it exists.
 
     Raises:
         AttributeError:
             If ``model`` doesn't have ``attribute`` in any of
             model namespace, the hparams namespace/dict, and the datamodule.
+
     """
     holders = _lightning_get_all_attr_holders(model, attribute)
     if len(holders) == 0:

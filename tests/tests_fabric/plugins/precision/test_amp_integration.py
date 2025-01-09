@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Integration tests for Automatic Mixed Precision (AMP) training."""
+
 import pytest
 import torch
 import torch.nn as nn
 
 from lightning.fabric import Fabric, seed_everything
-from tests_fabric.helpers.models import BoringFabric
+from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_2_4
 from tests_fabric.helpers.runif import RunIf
 
 
@@ -38,24 +39,6 @@ class MixedPrecisionModule(nn.Module):
         return output
 
 
-class MixedPrecisionBoringFabric(BoringFabric):
-    expected_dtype: torch.dtype
-
-    def get_model(self):
-        return MixedPrecisionModule(self.expected_dtype)
-
-    def step(self, model, batch):
-        assert model.layer.weight.dtype == torch.float32
-
-        assert batch.dtype == torch.float32
-        output = model(batch)
-        assert output.dtype == torch.float32
-        return torch.nn.functional.mse_loss(output, torch.ones_like(output))
-
-    def after_backward(self, model, optimizer):
-        assert model.layer.weight.grad.dtype == torch.float32
-
-
 @pytest.mark.parametrize(
     ("accelerator", "precision", "expected_dtype"),
     [
@@ -66,12 +49,31 @@ class MixedPrecisionBoringFabric(BoringFabric):
     ],
 )
 def test_amp(accelerator, precision, expected_dtype):
-    fabric = MixedPrecisionBoringFabric(accelerator=accelerator, precision=precision, devices=2, strategy="ddp_spawn")
-    fabric.expected_dtype = expected_dtype
-    fabric.run()
+    fabric = Fabric(accelerator=accelerator, precision=precision, devices=2, strategy="ddp_spawn")
+    fabric.launch(_test_amp, expected_dtype)
 
 
-@RunIf(min_torch="1.13", min_cuda_gpus=1)
+def _test_amp(fabric, expected_dtype):
+    model = MixedPrecisionModule(expected_dtype)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+    model, optimizer = fabric.setup(model, optimizer)
+
+    batch = torch.rand(2, 32, device=fabric.device)
+    assert model.layer.weight.dtype == torch.float32
+    assert batch.dtype == torch.float32
+
+    output = model(batch)
+    assert output.dtype == torch.float32
+
+    loss = torch.nn.functional.mse_loss(output, torch.ones_like(output))
+    fabric.backward(loss)
+    assert model.layer.weight.grad.dtype == torch.float32
+
+    optimizer.step()
+    optimizer.zero_grad()
+
+
+@RunIf(min_cuda_gpus=1)
 def test_amp_fused_optimizer_parity():
     def run(fused=False):
         seed_everything(1234)
@@ -81,7 +83,8 @@ def test_amp_fused_optimizer_parity():
         optimizer = torch.optim.Adam(model.parameters(), lr=1.0, fused=fused)
 
         model, optimizer = fabric.setup(model, optimizer)
-        assert isinstance(fabric._precision.scaler, torch.cuda.amp.GradScaler)
+        scaler_cls = torch.amp.GradScaler if _TORCH_GREATER_EQUAL_2_4 else torch.cuda.amp.GradScaler
+        assert isinstance(fabric._precision.scaler, scaler_cls)
 
         data = torch.randn(10, 10, device="cuda")
         target = torch.randn(10, 10, device="cuda")

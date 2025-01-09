@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union
+from typing import Union
 
 import torch
+from typing_extensions import override
 
 from lightning.fabric.accelerators.accelerator import Accelerator
 from lightning.fabric.accelerators.registry import _AcceleratorRegistry
@@ -22,6 +23,7 @@ from lightning.fabric.accelerators.registry import _AcceleratorRegistry
 class CPUAccelerator(Accelerator):
     """Accelerator for CPU devices."""
 
+    @override
     def setup_device(self, device: torch.device) -> None:
         """
         Raises:
@@ -31,45 +33,51 @@ class CPUAccelerator(Accelerator):
         if device.type != "cpu":
             raise ValueError(f"Device should be CPU, got {device} instead.")
 
+    @override
     def teardown(self) -> None:
         pass
 
     @staticmethod
-    def parse_devices(devices: Union[int, str, List[int]]) -> int:
+    @override
+    def parse_devices(devices: Union[int, str]) -> int:
         """Accelerator device parsing logic."""
         return _parse_cpu_cores(devices)
 
     @staticmethod
-    def get_parallel_devices(devices: Union[int, str, List[int]]) -> List[torch.device]:
+    @override
+    def get_parallel_devices(devices: Union[int, str]) -> list[torch.device]:
         """Gets parallel devices for the Accelerator."""
         devices = _parse_cpu_cores(devices)
         return [torch.device("cpu")] * devices
 
     @staticmethod
+    @override
     def auto_device_count() -> int:
         """Get the devices when set to auto."""
         return 1
 
     @staticmethod
+    @override
     def is_available() -> bool:
         """CPU is always available for execution."""
         return True
 
     @classmethod
+    @override
     def register_accelerators(cls, accelerator_registry: _AcceleratorRegistry) -> None:
         accelerator_registry.register(
             "cpu",
             cls,
-            description=cls.__class__.__name__,
+            description=cls.__name__,
         )
 
 
-def _parse_cpu_cores(cpu_cores: Union[int, str, List[int]]) -> int:
+def _parse_cpu_cores(cpu_cores: Union[int, str]) -> int:
     """Parses the cpu_cores given in the format as accepted by the ``devices`` argument in the
-    :class:`~lightning.pytorch.trainer.Trainer`.
+    :class:`~lightning.pytorch.trainer.trainer.Trainer`.
 
     Args:
-        cpu_cores: An int > 0.
+        cpu_cores: An int > 0 or a string that can be converted to an int > 0.
 
     Returns:
         An int representing the number of processes
@@ -77,6 +85,7 @@ def _parse_cpu_cores(cpu_cores: Union[int, str, List[int]]) -> int:
     Raises:
         MisconfigurationException:
             If cpu_cores is not an int > 0
+
     """
     if isinstance(cpu_cores, str) and cpu_cores.strip().isdigit():
         cpu_cores = int(cpu_cores)

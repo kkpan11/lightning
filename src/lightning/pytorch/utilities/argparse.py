@@ -19,12 +19,12 @@ from argparse import Namespace
 from ast import literal_eval
 from contextlib import suppress
 from functools import wraps
-from typing import Any, Callable, cast, Type, TypeVar
+from typing import Any, Callable, TypeVar, cast
 
 _T = TypeVar("_T", bound=Callable[..., Any])
 
 
-def _parse_env_variables(cls: Type, template: str = "PL_%(cls_name)s_%(cls_argument)s") -> Namespace:
+def _parse_env_variables(cls: type, template: str = "PL_%(cls_name)s_%(cls_argument)s") -> Namespace:
     """Parse environment arguments if they are defined.
 
     Examples:
@@ -38,6 +38,7 @@ def _parse_env_variables(cls: Type, template: str = "PL_%(cls_name)s_%(cls_argum
         >>> _parse_env_variables(Trainer)
         Namespace(devices=42)
         >>> del os.environ["PL_TRAINER_DEVICES"]
+
     """
     env_args = {}
     for arg_name in inspect.signature(cls).parameters:

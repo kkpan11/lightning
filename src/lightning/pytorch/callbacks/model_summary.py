@@ -15,27 +15,29 @@
 Model Summary
 =============
 
-Generates a summary of all layers in a :class:`~lightning.pytorch.core.module.LightningModule`.
+Generates a summary of all layers in a :class:`~lightning.pytorch.core.LightningModule`.
 
 The string representation of this summary prints a table with columns containing
 the name, type and number of parameters for each layer.
 
 """
+
 import logging
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Union
+
+from typing_extensions import override
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks.callback import Callback
-from lightning.pytorch.utilities.model_summary import DeepSpeedSummary
+from lightning.pytorch.utilities.model_summary import DeepSpeedSummary, summarize
 from lightning.pytorch.utilities.model_summary import ModelSummary as Summary
-from lightning.pytorch.utilities.model_summary import summarize
 from lightning.pytorch.utilities.model_summary.model_summary import _format_summary_table
 
 log = logging.getLogger(__name__)
 
 
 class ModelSummary(Callback):
-    r"""Generates a summary of all layers in a :class:`~lightning.pytorch.core.module.LightningModule`.
+    r"""Generates a summary of all layers in a :class:`~lightning.pytorch.core.LightningModule`.
 
     Args:
         max_depth: The maximum depth of layer nesting that the summary will include. A value of 0 turns the
@@ -47,12 +49,14 @@ class ModelSummary(Callback):
         >>> from lightning.pytorch import Trainer
         >>> from lightning.pytorch.callbacks import ModelSummary
         >>> trainer = Trainer(callbacks=[ModelSummary(max_depth=1)])
+
     """
 
     def __init__(self, max_depth: int = 1, **summarize_kwargs: Any) -> None:
         self._max_depth: int = max_depth
-        self._summarize_kwargs: Dict[str, Any] = summarize_kwargs
+        self._summarize_kwargs: dict[str, Any] = summarize_kwargs
 
+    @override
     def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if not self._max_depth:
             return
@@ -62,9 +66,17 @@ class ModelSummary(Callback):
         total_parameters = model_summary.total_parameters
         trainable_parameters = model_summary.trainable_parameters
         model_size = model_summary.model_size
+        total_training_modes = model_summary.total_training_modes
 
         if trainer.is_global_zero:
-            self.summarize(summary_data, total_parameters, trainable_parameters, model_size, **self._summarize_kwargs)
+            self.summarize(
+                summary_data,
+                total_parameters,
+                trainable_parameters,
+                model_size,
+                total_training_modes,
+                **self._summarize_kwargs,
+            )
 
     def _summary(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> Union[DeepSpeedSummary, Summary]:
         from lightning.pytorch.strategies.deepspeed import DeepSpeedStrategy
@@ -75,16 +87,18 @@ class ModelSummary(Callback):
 
     @staticmethod
     def summarize(
-        summary_data: List[Tuple[str, List[str]]],
+        summary_data: list[tuple[str, list[str]]],
         total_parameters: int,
         trainable_parameters: int,
         model_size: float,
+        total_training_modes: dict[str, int],
         **summarize_kwargs: Any,
     ) -> None:
         summary_table = _format_summary_table(
             total_parameters,
             trainable_parameters,
             model_size,
+            total_training_modes,
             *summary_data,
         )
         log.info("\n" + summary_table)

@@ -3,21 +3,25 @@
    :maxdepth: 1
    :hidden:
 
+   2D Parallelism <../advanced/model_parallel/tp_fsdp>
    Accelerators <../extensions/accelerator>
    Callback <../extensions/callbacks>
    Checkpointing <../common/checkpointing>
    Cluster <../clouds/cluster>
    Cloud checkpoint <../common/checkpointing_advanced>
+   Compile <../advanced/compile>
    Console Logging <../common/console_logs>
    Debugging <../debug/debugging>
+   DeepSpeed <../advanced/model_parallel/deepspeed>
+   Distributed Checkpoints <../common/checkpointing_expert>
    Early stopping <../common/early_stopping>
    Experiment manager (Logger) <../visualize/experiment_managers>
    Finetuning <../advanced/finetuning>
+   FSDP <../advanced/model_parallel/fsdp>
    GPU <../accelerators/gpu>
    Half precision <../common/precision>
-   HPU <../accelerators/hpu>
+   HPU <../integrations/hpu/index>
    Inference <../deploy/production_intermediate>
-   IPU <../accelerators/ipu>
    Lightning CLI <../cli/lightning_cli>
    LightningDataModule <../data/datamodule>
    LightningModule <../common/lightning_module>
@@ -25,7 +29,7 @@
    TPU <../accelerators/tpu>
    Metrics <https://torchmetrics.readthedocs.io/en/stable/>
    Model <../model/build_model.rst>
-   Model Parallel <../advanced/model_parallel>
+   Model Parallel <../advanced/model_parallel/index>
    Plugins <../extensions/plugins>
    Progress bar <../common/progress_bar>
    Production <../deploy/production_advanced>
@@ -36,12 +40,16 @@
    Remote filesystem and FSSPEC <../common/remote_fs>
    Strategy <../extensions/strategy>
    Strategy registry <../advanced/strategy_registry>
+   Strategy integrations <../integrations/strategies/index>
    Style guide <../starter/style_guide>
    SWA <../advanced/training_tricks>
    SLURM <../clouds/cluster_advanced>
+   Tensor Parallel <../advanced/model_parallel/tp>
    Transfer learning <../advanced/transfer_learning>
    Trainer <../common/trainer>
-   Torch distributed <../clouds/cluster_intermediate_2>
+   TorchRun (TorchElastic) <../clouds/cluster_intermediate_2>
+   Warnings <../advanced/warnings>
+
 
 ########
 Glossary
@@ -51,6 +59,13 @@ Glossary
 
     <div class="display-card-container">
         <div class="row">
+
+.. displayitem::
+   :header: 2D Parallelism
+   :description: Combine Tensor Parallelism with FSDP (2D Parallel) to train efficiently on 100s of GPUs
+   :col_css: col-md-12
+   :button_link: ../advanced/model_parallel/tp_fsdp.html
+   :height: 100
 
 .. displayitem::
    :header: Accelerators
@@ -88,6 +103,13 @@ Glossary
    :height: 100
 
 .. displayitem::
+   :header: Compile
+   :description: Use torch.compile to speed up models on modern hardware
+   :col_css: col-md-12
+   :button_link: ../advanced/compile.html
+   :height: 100
+
+.. displayitem::
    :header: Console Logging
    :description: Capture more visible logs
    :col_css: col-md-12
@@ -99,6 +121,20 @@ Glossary
    :description: Fix errors in your code
    :col_css: col-md-12
    :button_link: ../debug/debugging.html
+   :height: 100
+
+.. displayitem::
+   :header: DeepSpeed
+   :description: Distribute models with billions of parameters across hundreds GPUs
+   :col_css: col-md-12
+   :button_link: ../advanced/model_parallel/deepspeed.html
+   :height: 100
+
+.. displayitem::
+   :header: Distributed Checkpoints
+   :description: Save and load very large models efficiently with distributed checkpoints
+   :col_css: col-md-12
+   :button_link: ../common/checkpointing_expert.html
    :height: 100
 
 .. displayitem::
@@ -123,6 +159,13 @@ Glossary
    :height: 100
 
 .. displayitem::
+   :header: FSDP
+   :description: Distribute models with billions of parameters across hundreds GPUs
+   :col_css: col-md-12
+   :button_link: ../advanced/model_parallel/fsdp.html
+   :height: 100
+
+.. displayitem::
    :header: GPU
    :description: Graphics Processing Unit for faster training
    :col_css: col-md-12
@@ -131,7 +174,7 @@ Glossary
 
 .. displayitem::
    :header: Half precision
-   :description: Using different numerical formats to save memory and run fatser
+   :description: Using different numerical formats to save memory and run faster
    :col_css: col-md-12
    :button_link: ../common/precision.html
    :height: 100
@@ -140,7 +183,7 @@ Glossary
    :header: HPU
    :description: Habana Gaudi AI Processor Unit for faster training
    :col_css: col-md-12
-   :button_link: ../accelerators/hpu.html
+   :button_link: ../integrations/hpu/index.html
    :height: 100
 
 .. displayitem::
@@ -148,13 +191,6 @@ Glossary
    :description: Making predictions by applying a trained model to unlabeled examples
    :col_css: col-md-12
    :button_link: ../deploy/production_intermediate.html
-   :height: 100
-
-.. displayitem::
-   :header: IPU
-   :description: Graphcore Intelligence Processing Unit for faster training
-   :col_css: col-md-12
-   :button_link: ../accelerators/ipu.html
    :height: 100
 
 .. displayitem::
@@ -180,7 +216,7 @@ Glossary
 
 .. displayitem::
    :header: Log
-   :description: Outpus or results used for visualization and tracking
+   :description: Outputs or results used for visualization and tracking
    :col_css: col-md-12
    :button_link: ../visualize/loggers.html
    :height: 100
@@ -203,7 +239,7 @@ Glossary
    :header: Model Parallelism
    :description: A way to scale training that splits a model between multiple devices.
    :col_css: col-md-12
-   :button_link: ../advanced/model_parallel.html
+   :button_link: ../advanced/model_parallel/index.html
    :height: 100
 
 .. displayitem::
@@ -285,7 +321,7 @@ Glossary
 
 .. displayitem::
    :header: Style guide
-   :description: Best practices to improve readability and reproducability
+   :description: Best practices to improve readability and reproducibility
    :col_css: col-md-12
    :button_link: ../starter/style_guide.html
    :height: 100
@@ -302,6 +338,13 @@ Glossary
    :description: Simple Linux Utility for Resource Management, or simply Slurm, is a free and open-source job scheduler for Linux clusters
    :col_css: col-md-12
    :button_link: ../clouds/cluster_advanced.html
+   :height: 100
+
+.. displayitem::
+   :header: Tensor Parallelism
+   :description: Parallelize the computation of model layers across multiple GPUs, reducing memory usage and communication overhead
+   :col_css: col-md-12
+   :button_link: ../advanced/tp.html
    :height: 100
 
 .. displayitem::
@@ -323,6 +366,13 @@ Glossary
    :description: Setup for running on distributed environments
    :col_css: col-md-12
    :button_link: ../clouds/cluster_intermediate_2.html
+   :height: 100
+
+.. displayitem::
+   :header: Warnings
+   :description: Disable false-positive warnings emitted by Lightning
+   :col_css: col-md-12
+   :button_link: ../advanced/warnings.html
    :height: 100
 
 .. raw:: html

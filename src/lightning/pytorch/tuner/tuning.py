@@ -11,12 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Literal, Optional, Union
+from typing import TYPE_CHECKING, Literal, Optional, Union
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks.callback import Callback
 from lightning.pytorch.utilities.exceptions import MisconfigurationException
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
+
+if TYPE_CHECKING:
+    from lightning.pytorch.tuner.lr_finder import _LRFinder
 
 
 class Tuner:
@@ -39,8 +42,8 @@ class Tuner:
         max_trials: int = 25,
         batch_arg_name: str = "batch_size",
     ) -> Optional[int]:
-        """Iteratively try to find the largest batch size for a given model that does not give an out of memory
-        (OOM) error.
+        """Iteratively try to find the largest batch size for a given model that does not give an out of memory (OOM)
+        error.
 
         Args:
             model: Model to tune.
@@ -71,6 +74,7 @@ class Tuner:
                 - ``model``
                 - ``model.hparams``
                 - ``trainer.datamodule`` (the datamodule passed to the tune method)
+
         """
         _check_tuner_configuration(train_dataloaders, val_dataloaders, dataloaders, method)
         _check_scale_batch_size_configuration(self._trainer)
@@ -113,10 +117,10 @@ class Tuner:
         max_lr: float = 1,
         num_training: int = 100,
         mode: str = "exponential",
-        early_stop_threshold: float = 4.0,
+        early_stop_threshold: Optional[float] = 4.0,
         update_attr: bool = True,
         attr_name: str = "",
-    ) -> Optional["pl.tuner.lr_finder._LRFinder"]:
+    ) -> Optional["_LRFinder"]:
         """Enables the user to do a range test of good initial learning rates, to reduce the amount of guesswork in
         picking a good starting learning rate.
 
@@ -149,9 +153,10 @@ class Tuner:
             MisconfigurationException:
                 If learning rate/lr in ``model`` or ``model.hparams`` isn't overridden,
                 or if you are using more than one optimizer.
+
         """
         if method != "fit":
-            raise MisconfigurationException("method='fit' is an invalid configuration to run lr finder.")
+            raise MisconfigurationException("method='fit' is the only valid configuration to run lr finder.")
 
         _check_tuner_configuration(train_dataloaders, val_dataloaders, dataloaders, method)
         _check_lr_find_configuration(self._trainer)

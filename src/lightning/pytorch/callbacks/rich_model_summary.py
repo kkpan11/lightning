@@ -11,20 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, List, Tuple
+from typing import Any
+
+from typing_extensions import override
 
 from lightning.pytorch.callbacks import ModelSummary
 from lightning.pytorch.callbacks.progress.rich_progress import _RICH_AVAILABLE
 from lightning.pytorch.utilities.model_summary import get_human_readable_count
 
-if _RICH_AVAILABLE:  # type: ignore[has-type]
-    from rich import get_console
-    from rich.table import Table
-
 
 class RichModelSummary(ModelSummary):
-    r"""Generates a summary of all layers in a :class:`~lightning.pytorch.core.module.LightningModule` with `rich
-    text formatting <https://github.com/Textualize/rich>`_.
+    r"""Generates a summary of all layers in a :class:`~lightning.pytorch.core.LightningModule` with `rich text
+    formatting <https://github.com/Textualize/rich>`_.
 
     Install it with pip:
 
@@ -56,6 +54,7 @@ class RichModelSummary(ModelSummary):
     Raises:
         ModuleNotFoundError:
             If required `rich` package is not installed on the device.
+
     """
 
     def __init__(self, max_depth: int = 1, **summarize_kwargs: Any) -> None:
@@ -66,13 +65,18 @@ class RichModelSummary(ModelSummary):
         super().__init__(max_depth, **summarize_kwargs)
 
     @staticmethod
+    @override
     def summarize(
-        summary_data: List[Tuple[str, List[str]]],
+        summary_data: list[tuple[str, list[str]]],
         total_parameters: int,
         trainable_parameters: int,
         model_size: float,
+        total_training_modes: dict[str, int],
         **summarize_kwargs: Any,
     ) -> None:
+        from rich import get_console
+        from rich.table import Table
+
         console = get_console()
 
         header_style: str = summarize_kwargs.get("header_style", "bold magenta")
@@ -81,6 +85,7 @@ class RichModelSummary(ModelSummary):
         table.add_column("Name", justify="left", no_wrap=True)
         table.add_column("Type")
         table.add_column("Params", justify="right")
+        table.add_column("Mode")
 
         column_names = list(zip(*summary_data))[0]
 
@@ -106,5 +111,7 @@ class RichModelSummary(ModelSummary):
         grid.add_row(f"[bold]Non-trainable params[/]: {parameters[1]}")
         grid.add_row(f"[bold]Total params[/]: {parameters[2]}")
         grid.add_row(f"[bold]Total estimated model params size (MB)[/]: {parameters[3]}")
+        grid.add_row(f"[bold]Modules in train mode[/]: {total_training_modes['train']}")
+        grid.add_row(f"[bold]Modules in eval mode[/]: {total_training_modes['eval']}")
 
         console.print(grid)

@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Utilities to help with reproducibility of models."""
+
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 from lightning.fabric.utilities.seed import _collect_rng_states, _set_rng_states
 
@@ -38,6 +39,7 @@ def isolate_rng(include_cuda: bool = True) -> Generator[None, None, None]:
         [tensor([0.7576]), tensor([0.2793]), tensor([0.4031])]
         >>> torch.rand(1)
         tensor([0.7576])
+
     """
     states = _collect_rng_states(include_cuda)
     yield

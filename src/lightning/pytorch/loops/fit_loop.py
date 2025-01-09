@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
+from typing_extensions import override
 
 import lightning.pytorch as pl
-from lightning.fabric.utilities.data import _set_sampler_epoch
+from lightning.fabric.utilities.data import _set_sampler_epoch, sized_len
+from lightning.fabric.utilities.warnings import PossibleUserWarning
 from lightning.pytorch.loops import _Loop
 from lightning.pytorch.loops.fetchers import _DataFetcher
 from lightning.pytorch.loops.progress import _Progress
@@ -39,9 +42,17 @@ from lightning.pytorch.utilities.data import has_len_all_ranks
 from lightning.pytorch.utilities.exceptions import MisconfigurationException, SIGTERMException
 from lightning.pytorch.utilities.model_helpers import is_overridden
 from lightning.pytorch.utilities.rank_zero import rank_zero_debug, rank_zero_info, rank_zero_warn
-from lightning.pytorch.utilities.warnings import PossibleUserWarning
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class RestartStage:
+    NONE = "none"
+    RESTARTED_ON_EPOCH_START = "restarted_on_epoch_start"
+    RESTARTED_MID_EPOCH = "restarted_mid_epoch"
+    RESTARTED_ON_EPOCH_END = "restarted_on_epoch_end"
+    RESUMED_ON_EPOCH_END = "resumed_on_epoch_end"
 
 
 class _FitLoop(_Loop):
@@ -69,6 +80,7 @@ class _FitLoop(_Loop):
     Args:
         min_epochs: The minimum number of epochs
         max_epochs: The maximum number of epochs, can be set -1 to turn this limit off
+
     """
 
     def __init__(
@@ -92,8 +104,10 @@ class _FitLoop(_Loop):
 
         self._data_source = _DataLoaderSource(None, "train_dataloader")
         self._combined_loader: Optional[CombinedLoader] = None
+        self._combined_loader_states_to_load: list[dict[str, Any]] = []
         self._data_fetcher: Optional[_DataFetcher] = None
         self._last_train_dl_reload_epoch = float("-inf")
+        self._restart_stage = RestartStage.NONE
 
     @property
     def total_batch_idx(self) -> int:
@@ -116,6 +130,7 @@ class _FitLoop(_Loop):
         return self.epoch_loop.max_steps
 
     @_Loop.restarting.setter
+    @override
     def restarting(self, restarting: bool) -> None:
         # if the last epoch completely finished, we are not actually restarting
         values = self.epoch_progress.current.ready, self.epoch_progress.current.started
@@ -200,9 +215,10 @@ class _FitLoop(_Loop):
                 self.on_advance_start()
                 self.advance()
                 self.on_advance_end()
-                self._restarting = False
             except StopIteration:
                 break
+            finally:
+                self.on_iteration_done()
         self._restarting = False
         self.on_run_end()
 
@@ -243,12 +259,26 @@ class _FitLoop(_Loop):
         if trainer.datamodule is not None:
             allow_zero_length |= trainer.datamodule.allow_zero_length_dataloader_with_multiple_devices
 
+        limits = []
+        for dl in combined_loader.flattened:
+            # determine number of batches
+            length = len(dl) if has_len_all_ranks(dl, trainer.strategy, allow_zero_length) else float("inf")
+            num_batches = _parse_num_batches(stage, length, trainer.limit_train_batches)
+            limits.append(num_batches)
+
+        combined_loader.limits = limits
+
+        self._load_combined_loader_states()
+
+        self._data_fetcher = _select_data_fetcher(trainer, RunningStage.TRAINING)
+        self._data_fetcher.setup(combined_loader)
+        iter(self._data_fetcher)  # creates the iterator inside the fetcher
+        max_batches = sized_len(combined_loader)
+        self.max_batches = max_batches if max_batches is not None else float("inf")
         has_len_all_ranks_ = has_len_all_ranks(combined_loader, trainer.strategy, allow_zero_length)
-        self.max_batches = len(combined_loader) if has_len_all_ranks_ else float("inf")
+
         if self.max_batches == 0:
             return
-
-        self.max_batches = _parse_num_batches(stage, self.max_batches, trainer.limit_train_batches)
 
         # store epoch of dataloader reset for reload_dataloaders_every_n_epochs
         self._last_train_dl_reload_epoch = trainer.current_epoch
@@ -276,7 +306,7 @@ class _FitLoop(_Loop):
                 trainer.val_check_batch = int(self.max_batches * trainer.val_check_interval)
                 trainer.val_check_batch = max(1, trainer.val_check_batch)
 
-        if trainer.loggers and self.max_batches < trainer.log_every_n_steps:
+        if trainer.loggers and self.max_batches < trainer.log_every_n_steps and not trainer.fast_dev_run:
             rank_zero_warn(
                 f"The number of training batches ({self.max_batches}) is smaller than the logging interval"
                 f" Trainer(log_every_n_steps={trainer.log_every_n_steps}). Set a lower value for log_every_n_steps if"
@@ -284,14 +314,91 @@ class _FitLoop(_Loop):
                 category=PossibleUserWarning,
             )
 
+    @property
+    def restarted_on_epoch_start(self) -> bool:
+        return self._restart_stage == RestartStage.RESTARTED_ON_EPOCH_START
+
+    @property
+    def restarted_mid_epoch(self) -> bool:
+        return self._restart_stage == RestartStage.RESTARTED_MID_EPOCH
+
+    @property
+    def restarted_on_epoch_end(self) -> bool:
+        return self._restart_stage == RestartStage.RESTARTED_ON_EPOCH_END
+
+    @property
+    def resumed_on_epoch_end(self) -> bool:
+        # This case happens when restarting from last without validation at
+        # the end of epoch. In this case self.restarting is False.
+        return self._restart_stage == RestartStage.RESUMED_ON_EPOCH_END
+
+    def update_restart_stage(self) -> None:
+        if (
+            self.restarting
+            and self.epoch_progress.total.started == self.epoch_progress.total.ready - 1
+            and self.epoch_progress.total.processed == self.epoch_progress.total.started
+            and self.epoch_progress.total.completed == self.epoch_progress.total.processed
+        ):
+            self._restart_stage = RestartStage.RESTARTED_ON_EPOCH_START
+        elif (
+            self.restarting
+            and self.epoch_progress.total.started == self.epoch_progress.total.ready
+            and self.epoch_progress.total.processed == self.epoch_progress.total.started - 1
+            and self.epoch_progress.total.completed == self.epoch_progress.total.processed
+        ):
+            self._restart_stage = RestartStage.RESTARTED_MID_EPOCH
+        elif (
+            self.restarting
+            and self.epoch_progress.total.started == self.epoch_progress.total.ready
+            and self.epoch_progress.total.processed == self.epoch_progress.total.started
+            and self.epoch_progress.total.completed == self.epoch_progress.total.processed - 1
+        ):
+            self._restart_stage = RestartStage.RESTARTED_ON_EPOCH_END
+        elif (
+            self._loaded_from_state_dict
+            and self.epoch_progress.total.started == self.epoch_progress.total.ready
+            and self.epoch_progress.total.processed == self.epoch_progress.total.started
+            and self.epoch_progress.total.completed == self.epoch_progress.total.processed - 1
+        ):
+            self._restart_stage = RestartStage.RESUMED_ON_EPOCH_END
+        else:
+            self._restart_stage = RestartStage.NONE
+
+        self.epoch_loop.update_restart_stage()
+
+    def reset_restart_stage(self) -> None:
+        self._restart_stage = RestartStage.NONE
+
     def reset(self) -> None:
         """Resets the internal state of this loop."""
         assert self.trainer.model is not None
-        self.trainer.model.train()
         torch.set_grad_enabled(True)
 
-        if self.restarting:
+        self.update_restart_stage()
+
+        if self.restarted_on_epoch_start:
             self.epoch_progress.reset_on_restart()
+
+        if self.resumed_on_epoch_end:
+            # when restarting from last without validation at end of epoch,
+            # self.restarting is False but it's still resuming
+            self.epoch_progress.increment_completed()
+
+        if (
+            self.epoch_loop.restarted_on_train_batch_end
+            and self.restarted_mid_epoch
+            and self.epoch_loop.batch_progress.is_last_batch
+        ):
+            self.epoch_progress.increment_processed()
+            self.epoch_progress.increment_completed()
+
+        if (
+            self.epoch_loop.restarted_on_train_batch_end
+            and self.epoch_loop.batch_progress.is_last_batch
+            and not self.restarted_mid_epoch
+            and not self.epoch_loop.val_loop.batch_progress.is_last_batch
+        ):
+            self.epoch_progress.increment_completed()
 
     def on_run_start(self) -> None:
         """Calls the ``on_train_start`` hook."""
@@ -306,8 +413,6 @@ class _FitLoop(_Loop):
             trainer.validating = True
             self.epoch_loop.val_loop.setup_data()
             trainer.training = True
-
-        self._data_fetcher = _select_data_fetcher(trainer)
 
         call._call_callback_hooks(trainer, "on_train_start")
         call._call_lightning_module_hook(trainer, "on_train_start")
@@ -325,14 +430,14 @@ class _FitLoop(_Loop):
         for i, dl in enumerate(self._combined_loader.flattened):
             _set_sampler_epoch(dl, self.epoch_progress.current.processed)
 
-        self.epoch_progress.increment_ready()
+        if not self.restarted_mid_epoch and not self.restarted_on_epoch_end:
+            if not self.restarted_on_epoch_start:
+                self.epoch_progress.increment_ready()
 
-        trainer._logger_connector.on_epoch_start()
+            call._call_callback_hooks(trainer, "on_train_epoch_start")
+            call._call_lightning_module_hook(trainer, "on_train_epoch_start")
 
-        call._call_callback_hooks(trainer, "on_train_epoch_start")
-        call._call_lightning_module_hook(trainer, "on_train_epoch_start")
-
-        self.epoch_progress.increment_started()
+            self.epoch_progress.increment_started()
 
     def advance(self) -> None:
         """Runs one whole epoch."""
@@ -345,9 +450,8 @@ class _FitLoop(_Loop):
                 f'`{type(self).__name__}` does not support the `CombinedLoader(mode="sequential")` mode.'
                 f" The available modes are: {[m for m in _SUPPORTED_MODES if m != 'sequential']}"
             )
-        assert self._data_fetcher is not None
-        self._data_fetcher.setup(combined_loader)
         with self.trainer.profiler.profile("run_training_epoch"):
+            assert self._data_fetcher is not None
             self.epoch_loop.run(self._data_fetcher)
 
     def on_advance_end(self) -> None:
@@ -367,8 +471,7 @@ class _FitLoop(_Loop):
 
         trainer._logger_connector.on_epoch_end()
 
-        if self.epoch_loop._num_ready_batches_reached():
-            # if we are restarting and the above condition holds, it's because we are reloading an epoch-end checkpoint.
+        if not self.restarting and self.epoch_loop._num_ready_batches_reached():
             # since metric-based schedulers require access to metrics and those are not currently saved in the
             # checkpoint, the plateau schedulers shouldn't be updated
             self.epoch_loop.update_lr_schedulers("epoch", update_plateau_schedulers=not self.restarting)
@@ -400,9 +503,27 @@ class _FitLoop(_Loop):
             self._data_fetcher = None
         self.epoch_loop.teardown()
 
+    @override
+    def on_save_checkpoint(self) -> dict:
+        state_dict = super().on_save_checkpoint()
+        if self._combined_loader is not None and (loader_states := self._combined_loader._state_dicts()):
+            state_dict["combined_loader"] = loader_states
+        return state_dict
+
+    @override
+    def on_load_checkpoint(self, state_dict: dict) -> None:
+        self._combined_loader_states_to_load = state_dict.get("combined_loader", [])
+        super().on_load_checkpoint(state_dict)
+
     def _should_accumulate(self) -> bool:
         """Whether the gradients should be accumulated."""
         return self.epoch_loop._should_accumulate()
 
     def _iteration_based_training(self) -> bool:
         return self.trainer.max_steps != -1
+
+    def _load_combined_loader_states(self) -> None:
+        if not self.restarting or not self._combined_loader_states_to_load or self._combined_loader is None:
+            return
+        self._combined_loader._load_state_dicts(self._combined_loader_states_to_load)
+        self._combined_loader_states_to_load = []  # release memory

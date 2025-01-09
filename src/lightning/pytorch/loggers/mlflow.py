@@ -15,18 +15,21 @@
 MLflow Logger
 -------------
 """
+
 import logging
 import os
 import re
 import tempfile
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, Dict, List, Literal, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
 import yaml
 from lightning_utilities.core.imports import RequirementCache
 from torch import Tensor
+from typing_extensions import override
 
 from lightning.fabric.utilities.logger import _add_prefix, _convert_params, _flatten_dict
 from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
@@ -34,40 +37,13 @@ from lightning.pytorch.loggers.logger import Logger, rank_zero_experiment
 from lightning.pytorch.loggers.utilities import _scan_checkpoints
 from lightning.pytorch.utilities.rank_zero import rank_zero_only, rank_zero_warn
 
+if TYPE_CHECKING:
+    from mlflow.tracking import MlflowClient
+
 log = logging.getLogger(__name__)
 LOCAL_FILE_URI_PREFIX = "file:"
 _MLFLOW_AVAILABLE = RequirementCache("mlflow>=1.0.0", "mlflow")
-if _MLFLOW_AVAILABLE:
-    from mlflow.entities import Metric, Param
-    from mlflow.tracking import context, MlflowClient
-    from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
-else:
-    MlflowClient, context = None, None
-    Metric, Param = None, None
-    MLFLOW_RUN_NAME = "mlflow.runName"
-
-# before v1.1.0
-if hasattr(context, "resolve_tags"):
-    from mlflow.tracking.context import resolve_tags
-
-
-# since v1.1.0
-elif hasattr(context, "registry"):
-    from mlflow.tracking.context.registry import resolve_tags
-else:
-
-    def resolve_tags(tags: Optional[Dict] = None) -> Optional[Dict]:
-        """
-        Args:
-            tags: A dictionary of tags to override. If specified, tags passed in this argument will
-                 override those inferred from the context.
-
-        Returns: A dictionary of resolved tags.
-
-        Note:
-            See ``mlflow.tracking.context.registry`` for more details.
-        """
-        return tags
+_MLFLOW_SYNCHRONOUS_AVAILABLE = RequirementCache("mlflow>=2.8.0", "mlflow")
 
 
 class MLFlowLogger(Logger):
@@ -87,7 +63,7 @@ class MLFlowLogger(Logger):
         mlf_logger = MLFlowLogger(experiment_name="lightning_logs", tracking_uri="file:./ml-runs")
         trainer = Trainer(logger=mlf_logger)
 
-    Use the logger anywhere in your :class:`~lightning.pytorch.core.module.LightningModule` as follows:
+    Use the logger anywhere in your :class:`~lightning.pytorch.core.LightningModule` as follows:
 
     .. code-block:: python
 
@@ -111,7 +87,7 @@ class MLFlowLogger(Logger):
             back to `file:<save_dir>`.
         tags: A dictionary tags for the experiment.
         save_dir: A path to a local directory where the MLflow runs get saved.
-            Defaults to `./mlflow` if `tracking_uri` is not provided.
+            Defaults to `./mlruns` if `tracking_uri` is not provided.
             Has no effect if `tracking_uri` is provided.
         log_model: Log checkpoints created by :class:`~lightning.pytorch.callbacks.model_checkpoint.ModelCheckpoint`
             as MLFlow artifacts.
@@ -126,10 +102,13 @@ class MLFlowLogger(Logger):
         artifact_location: The location to store run artifacts. If not provided, the server picks an appropriate
             default.
         run_id: The run identifier of the experiment. If not provided, a new run is started.
+        synchronous: Hints mlflow whether to block the execution for every logging call until complete where
+            applicable. Requires mlflow >= 2.8.0
 
     Raises:
         ModuleNotFoundError:
             If required MLFlow package is not installed on the device.
+
     """
 
     LOGGER_JOIN_CHAR = "-"
@@ -139,15 +118,18 @@ class MLFlowLogger(Logger):
         experiment_name: str = "lightning_logs",
         run_name: Optional[str] = None,
         tracking_uri: Optional[str] = os.getenv("MLFLOW_TRACKING_URI"),
-        tags: Optional[Dict[str, Any]] = None,
+        tags: Optional[dict[str, Any]] = None,
         save_dir: Optional[str] = "./mlruns",
         log_model: Literal[True, False, "all"] = False,
         prefix: str = "",
         artifact_location: Optional[str] = None,
         run_id: Optional[str] = None,
+        synchronous: Optional[bool] = None,
     ):
         if not _MLFLOW_AVAILABLE:
             raise ModuleNotFoundError(str(_MLFLOW_AVAILABLE))
+        if synchronous is not None and not _MLFLOW_SYNCHRONOUS_AVAILABLE:
+            raise ModuleNotFoundError("`synchronous` requires mlflow>=2.8.0")
         super().__init__()
         if not tracking_uri:
             tracking_uri = f"{LOCAL_FILE_URI_PREFIX}{save_dir}"
@@ -159,29 +141,34 @@ class MLFlowLogger(Logger):
         self._run_id = run_id
         self.tags = tags
         self._log_model = log_model
-        self._logged_model_time: Dict[str, float] = {}
+        self._logged_model_time: dict[str, float] = {}
         self._checkpoint_callback: Optional[ModelCheckpoint] = None
         self._prefix = prefix
         self._artifact_location = artifact_location
-
+        self._log_batch_kwargs = {} if synchronous is None else {"synchronous": synchronous}
         self._initialized = False
+
+        from mlflow.tracking import MlflowClient
 
         self._mlflow_client = MlflowClient(tracking_uri)
 
     @property
     @rank_zero_experiment
-    def experiment(self) -> MlflowClient:
-        r"""
-        Actual MLflow object. To use MLflow features in your
-        :class:`~lightning.pytorch.core.module.LightningModule` do the following.
+    def experiment(self) -> "MlflowClient":
+        r"""Actual MLflow object. To use MLflow features in your :class:`~lightning.pytorch.core.LightningModule` do the
+        following.
 
         Example::
 
             self.logger.experiment.some_mlflow_function()
 
         """
+        import mlflow
+
         if self._initialized:
             return self._mlflow_client
+
+        mlflow.set_tracking_uri(self._tracking_uri)
 
         if self._run_id is not None:
             run = self._mlflow_client.get_run(self._run_id)
@@ -202,11 +189,16 @@ class MLFlowLogger(Logger):
         if self._run_id is None:
             if self._run_name is not None:
                 self.tags = self.tags or {}
+
+                from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
+
                 if MLFLOW_RUN_NAME in self.tags:
                     log.warning(
                         f"The tag {MLFLOW_RUN_NAME} is found in tags. The value will be overridden by {self._run_name}."
                     )
                 self.tags[MLFLOW_RUN_NAME] = self._run_name
+
+            resolve_tags = _get_resolve_tags()
             run = self._mlflow_client.create_run(experiment_id=self._experiment_id, tags=resolve_tags(self.tags))
             self._run_id = run.info.run_id
         self._initialized = True
@@ -218,6 +210,7 @@ class MLFlowLogger(Logger):
 
         Returns:
             The run id.
+
         """
         _ = self.experiment
         return self._run_id
@@ -228,14 +221,18 @@ class MLFlowLogger(Logger):
 
         Returns:
             The experiment id.
+
         """
         _ = self.experiment
         return self._experiment_id
 
+    @override
     @rank_zero_only
-    def log_hyperparams(self, params: Union[Dict[str, Any], Namespace]) -> None:
+    def log_hyperparams(self, params: Union[dict[str, Any], Namespace]) -> None:
         params = _convert_params(params)
         params = _flatten_dict(params)
+
+        from mlflow.entities import Param
 
         # Truncate parameter values to 250 characters.
         # TODO: MLflow 1.28 allows up to 500 characters: https://github.com/mlflow/mlflow/releases/tag/v1.28.0
@@ -243,14 +240,17 @@ class MLFlowLogger(Logger):
 
         # Log in chunks of 100 parameters (the maximum allowed by MLflow).
         for idx in range(0, len(params_list), 100):
-            self.experiment.log_batch(run_id=self.run_id, params=params_list[idx : idx + 100])
+            self.experiment.log_batch(run_id=self.run_id, params=params_list[idx : idx + 100], **self._log_batch_kwargs)
 
+    @override
     @rank_zero_only
     def log_metrics(self, metrics: Mapping[str, float], step: Optional[int] = None) -> None:
         assert rank_zero_only.rank == 0, "experiment tried to log from global_rank != 0"
 
+        from mlflow.entities import Metric
+
         metrics = _add_prefix(metrics, self._prefix, self.LOGGER_JOIN_CHAR)
-        metrics_list: List[Metric] = []
+        metrics_list: list[Metric] = []
 
         timestamp_ms = int(time() * 1000)
         for k, v in metrics.items():
@@ -268,8 +268,9 @@ class MLFlowLogger(Logger):
                 k = new_k
             metrics_list.append(Metric(key=k, value=v, timestamp=timestamp_ms, step=step or 0))
 
-        self.experiment.log_batch(run_id=self.run_id, metrics=metrics_list)
+        self.experiment.log_batch(run_id=self.run_id, metrics=metrics_list, **self._log_batch_kwargs)
 
+    @override
     @rank_zero_only
     def finalize(self, status: str = "success") -> None:
         if not self._initialized:
@@ -289,35 +290,42 @@ class MLFlowLogger(Logger):
             self.experiment.set_terminated(self.run_id, status)
 
     @property
+    @override
     def save_dir(self) -> Optional[str]:
         """The root file directory in which MLflow experiments are saved.
 
         Return:
             Local path to the root experiment directory if the tracking uri is local.
             Otherwise returns `None`.
+
         """
         if self._tracking_uri.startswith(LOCAL_FILE_URI_PREFIX):
-            return self._tracking_uri.lstrip(LOCAL_FILE_URI_PREFIX)
+            return self._tracking_uri[len(LOCAL_FILE_URI_PREFIX) :]
         return None
 
     @property
+    @override
     def name(self) -> Optional[str]:
         """Get the experiment id.
 
         Returns:
             The experiment id.
+
         """
         return self.experiment_id
 
     @property
+    @override
     def version(self) -> Optional[str]:
         """Get the run id.
 
         Returns:
             The run id.
+
         """
         return self.run_id
 
+    @override
     def after_save_checkpoint(self, checkpoint_callback: ModelCheckpoint) -> None:
         # log checkpoints as artifacts
         if self._log_model == "all" or self._log_model is True and checkpoint_callback.save_top_k == -1:
@@ -353,7 +361,7 @@ class MLFlowLogger(Logger):
             aliases = ["latest", "best"] if p == checkpoint_callback.best_model_path else ["latest"]
 
             # Artifact path on mlflow
-            artifact_path = f"model/checkpoints/{Path(p).stem}"
+            artifact_path = Path(p).stem
 
             # Log the checkpoint
             self.experiment.log_artifact(self._run_id, p, artifact_path)
@@ -373,3 +381,18 @@ class MLFlowLogger(Logger):
 
             # remember logged models - timestamp needed in case filename didn't change (lastkckpt or custom name)
             self._logged_model_time[p] = t
+
+
+def _get_resolve_tags() -> Callable:
+    from mlflow.tracking import context
+
+    # before v1.1.0
+    if hasattr(context, "resolve_tags"):
+        from mlflow.tracking.context import resolve_tags
+    # since v1.1.0
+    elif hasattr(context, "registry"):
+        from mlflow.tracking.context.registry import resolve_tags
+    else:
+        resolve_tags = lambda tags: tags
+
+    return resolve_tags
